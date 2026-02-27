@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: unnati-vehicles-open-ro
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
+    envVars:
+      - key: GOOGLE_SHEET_CSV_URL
+        value: "https://docs.google.com/spreadsheets/d/e/2PACX-1vS5ZtziwobOOI3q4nOCyd0bJoQk0IW7GtSeszy23yLveqRZHBZJajVw7BTFngJnREqS8xaIH93RzGOe/pub?gid=0&single=true&output=csv"
+      - key: CACHE_SECONDS
+        value: "60"
+      - key: AUTO_OPEN_BROWSER
+        value: "false"
+      - key: RENDER
+        value: "true"
