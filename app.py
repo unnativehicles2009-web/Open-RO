@@ -1,4 +1,3 @@
-import requests
 import os
 import re
 import io
@@ -10,46 +9,55 @@ import pandas as pd
 import requests
 from flask import Flask, jsonify, request, send_file, Response
 
-# =========================================================
-# RENDER + CONFIG
-# =========================================================
-HOST = os.environ.get("HOST", "0.0.0.0")
-PORT = int(os.environ.get("PORT", "5000"))
+# =============================================================================
+# CONFIG
+# =============================================================================
+HOST = os.environ.get("HOST", "127.0.0.1")
+PORT = int(os.environ.get("PORT", "5000"))  # Render sets PORT automatically
+AUTO_OPEN_BROWSER = os.environ.get("AUTO_OPEN_BROWSER", "1").strip() == "1"
 
-# Auto-open browser ONLY for local PC, not on Render
-AUTO_OPEN_BROWSER = os.environ.get("AUTO_OPEN_BROWSER", "true").strip().lower() == "true"
-IS_RENDER = os.environ.get("RENDER", "").strip().lower() == "true" or os.environ.get("RENDER_SERVICE_ID")
-
-# Google Sheet Published CSV URL (your link)
+# Render / Google Sheets CSV (Published as CSV)
 GOOGLE_SHEET_CSV_URL = os.environ.get(
     "GOOGLE_SHEET_CSV_URL",
-    "https://docs.google.com/spreadsheets/d/e/2PACX-1vS5ZtziwobOOI3q4nOCyd0bJoQk0IW7GtSeszy23yLveqRZHBZJajVw7BTFngJnREqS8xaIH93RzGOe/pub?gid=0&single=true&output=csv"
+    "https://docs.google.com/spreadsheets/d/e/2PACX-1vS5ZtziwobOOI3q4nOCyd0bJoQk0IW7GtSeszy23yLveqRZHBZJajVw7BTFngJnREqS8xaIH93RzGOe/pub?gid=0&single=true&output=csv",
 )
 
-# Cache seconds (Render performance)
-CACHE_SECONDS = int(os.environ.get("CACHE_SECONDS", "60"))  # recommended 30-120
-
-# If you ever want local Excel fallback (optional)
+# Local Excel fallback
 EXCEL_PATH = os.environ.get("OPEN_RO_XLSX", r"E:\Renault\Open RO.xlsx")
 SHEET_NAME = os.environ.get("OPEN_RO_SHEET", "Details")
 
-# =========================================================
+# Render detection
+IS_RENDER = bool(os.environ.get("RENDER")) or ("onrender.com" in os.environ.get("RENDER_EXTERNAL_URL", "")) or (
+    os.environ.get("PORT") is not None and os.environ.get("PORT") != "5000"
+)
+
+# =============================================================================
 # HELPERS
-# =========================================================
+# =============================================================================
 def parse_date_any(v):
-    if v is None or (isinstance(v, float) and pd.isna(v)) or pd.isna(v):
+    if v is None:
         return pd.NaT
+    try:
+        if isinstance(v, float) and pd.isna(v):
+            return pd.NaT
+    except Exception:
+        pass
+
     if isinstance(v, (pd.Timestamp, datetime)):
         return pd.to_datetime(v, errors="coerce")
+
     s = str(v).strip()
-    if s in ["", "-", "nan", "NaT", "None"]:
+    if s in ["", "-", "nan", "NaT", "None", "null"]:
         return pd.NaT
+
     for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%d-%b-%Y", "%d %b %Y"):
         try:
             return pd.to_datetime(s, format=fmt, errors="raise")
         except Exception:
             pass
+
     return pd.to_datetime(s, errors="coerce", dayfirst=True)
+
 
 def parse_iso_yyyy_mm_dd(s):
     s = (s or "").strip()
@@ -61,30 +69,36 @@ def parse_iso_yyyy_mm_dd(s):
         dt = pd.to_datetime(s, errors="coerce", dayfirst=True)
         return None if pd.isna(dt) else dt
 
+
 def clean_money_to_float(x):
-    """
-    Handles:
-    "Rs 12,345.00", "₹12,345", "12345", "-", blank, NaN
-    """
-    if x is None or (isinstance(x, float) and pd.isna(x)) or pd.isna(x):
+    if x is None:
         return 0.0
+    try:
+        if isinstance(x, float) and pd.isna(x):
+            return 0.0
+    except Exception:
+        pass
+
     s = str(x).strip()
-    if s in ["", "-", "nan", "NaT", "None"]:
+    if s in ["", "-", "nan", "NaT", "None", "null"]:
         return 0.0
 
-    s = s.replace("₹", "")
+    # remove "Rs", "₹", etc. keep minus and dot
     s = re.sub(r"(?i)rs\.?", "", s)
+    s = s.replace("₹", "")
     s = s.replace(",", "").strip()
 
-    # keep digits, minus, dot
-    s = re.sub(r"[^0-9\.\-]", "", s)
-    if s in ["", "-", ".", "-."]:
-        return 0.0
-
+    # sometimes values look like "Rs 1,234.00" or "1,234" or "1234"
     try:
         return float(s)
     except Exception:
-        return 0.0
+        # fallback: keep digits, dot, minus
+        s2 = re.sub(r"[^0-9\.\-]", "", s)
+        try:
+            return float(s2) if s2 else 0.0
+        except Exception:
+            return 0.0
+
 
 def age_bucket_from_days(days: int) -> str:
     if days <= 3:
@@ -99,30 +113,44 @@ def age_bucket_from_days(days: int) -> str:
         return "31-60 days"
     return "Above 60"
 
+
 def safe_str(v, default="-"):
-    if v is None or (isinstance(v, float) and pd.isna(v)) or pd.isna(v):
+    if v is None:
         return default
+    try:
+        if isinstance(v, float) and pd.isna(v):
+            return default
+    except Exception:
+        pass
     s = str(v).strip()
     return default if s == "" else s
 
+
 def fmt_ddmmyyyy(ts):
-    if ts is None or (isinstance(ts, float) and pd.isna(ts)) or pd.isna(ts):
+    if ts is None:
         return "-"
     try:
-        d = pd.to_datetime(ts, errors="coerce")
-        if pd.isna(d):
+        if isinstance(ts, float) and pd.isna(ts):
             return "-"
-        return d.strftime("%d/%m/%Y")
     except Exception:
+        pass
+
+    d = pd.to_datetime(ts, errors="coerce")
+    if pd.isna(d):
         return "-"
+    return d.strftime("%d/%m/%Y")
+
 
 def to_int_safe(v, default=0):
     try:
-        if v is None or (isinstance(v, float) and pd.isna(v)) or pd.isna(v):
+        if v is None:
+            return default
+        if isinstance(v, float) and pd.isna(v):
             return default
         return int(float(v))
     except Exception:
         return default
+
 
 def pick_first_existing_column(df: pd.DataFrame, candidates):
     if df is None or df.empty:
@@ -135,6 +163,7 @@ def pick_first_existing_column(df: pd.DataFrame, candidates):
             return lower_map[key]
     return None
 
+
 def proper_case_name(s: str) -> str:
     s = (s or "").strip()
     if not s:
@@ -143,25 +172,36 @@ def proper_case_name(s: str) -> str:
     parts = [p[:1].upper() + p[1:].lower() if p else "" for p in parts]
     return " ".join([p for p in parts if p])
 
-# =========================================================
-# REQUIRED COLUMNS (your mapping)
-# =========================================================
+
+def normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
+    # Keep original names, but also help matching if some headers have trailing spaces
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+# =============================================================================
+# LOAD + PREPARE DATA
+# =============================================================================
+DF = pd.DataFrame()
+MODEL_COL = None
+
 REQUIRED_COLS = [
-    "Dealer Code",                # Branch
-    "Repair Order #",             # RO ID
-    "RO Open Date",               # RO Date base
-    "Vehicle Registration No",    # Reg
-    "VIN #",                      # VIN (we won't show in table, but keep if needed)
-    "Odometer Reading",           # KM
-    "Assigned To Full Name",      # SA
-    "Status",                     # RO Status
-    "SR Type",                    # Dropdown
-    "Hold Reason",                # Dropdown (blank -> No reason)
-    "Total RO Amount",            # KPI + table
-    "Total Parts Amount",         # KPI + table
-    "Total Labor Amount",         # KPI + table
-    "Owner Contact First Name",   # Customer name part
-    "Owner Contact Last Name",    # Customer name part
+    "Dealer Code",
+    "Repair Order #",
+    "RO Open Date",
+    "Vehicle Registration No",
+    "VIN #",  # not shown in table, but may exist; we won't use in UI table
+    "Odometer Reading",
+    "Assigned To Full Name",
+    "Status",
+    "SR Type",
+    "Hold Reason",
+    "Total RO Amount",
+    "Total Parts Amount",
+    "Total Labor Amount",
+    "Owner Contact First Name",
+    "Owner Contact Last Name",
 ]
 
 MODEL_CANDIDATES = [
@@ -175,114 +215,92 @@ MODEL_CANDIDATES = [
     "MODEL GROUP",
 ]
 
-# =========================================================
-# CACHE + LOADING FROM GOOGLE SHEET CSV
-# =========================================================
-CACHE = {
-    "df": pd.DataFrame(),
-    "model_col": None,
-    "loaded_at": None,
-    "error": None,
-}
 
-def _read_google_sheet_csv() -> pd.DataFrame:
-    # Strong timeouts for Render stability
-    r = requests.get(GOOGLE_SHEET_CSV_URL, timeout=(8, 20))
-    r.raise_for_status()
-
-    # Some sheets return UTF-8 with BOM
-    text = r.content.decode("utf-8-sig", errors="replace")
-    df = pd.read_csv(io.StringIO(text))
-
-    # Trim column names
-    df.columns = [str(c).strip() for c in df.columns]
-    return df
-
-def _read_local_excel() -> pd.DataFrame:
-    if not os.path.exists(EXCEL_PATH):
-        raise FileNotFoundError(f"Excel not found: {EXCEL_PATH}")
-    df = pd.read_excel(EXCEL_PATH, sheet_name=SHEET_NAME)
-    df.columns = [str(c).strip() for c in df.columns]
-    return df
-
-def load_data(force: bool = False):
-    """
-    Loads data into CACHE['df'].
-    Uses Google Sheet CSV by default.
-    """
-    now = datetime.now()
-    if (not force) and CACHE["loaded_at"] is not None:
-        age = (now - CACHE["loaded_at"]).total_seconds()
-        if age < CACHE_SECONDS and CACHE["df"] is not None and not CACHE["df"].empty:
-            return
+def load_data():
+    global DF, MODEL_COL
 
     try:
-        df = _read_google_sheet_csv()
-
-        # Ensure required columns exist
-        for c in REQUIRED_COLS:
-            if c not in df.columns:
-                df[c] = None
-
-        model_col = pick_first_existing_column(df, MODEL_CANDIDATES)
-        if model_col is None:
-            df["Model Name"] = None
-            model_col = "Model Name"
-
-        # Dates
-        df["RO_DATE_DT"] = df["RO Open Date"].apply(parse_date_any)
-        today = pd.Timestamp(date.today())
-        df["DAYS_OPEN"] = (today - df["RO_DATE_DT"]).dt.days
-        df["DAYS_OPEN"] = df["DAYS_OPEN"].fillna(0).astype(int)
-        df.loc[df["DAYS_OPEN"] < 0, "DAYS_OPEN"] = 0
-        df["AGE_BUCKET"] = df["DAYS_OPEN"].apply(age_bucket_from_days)
-
-        # Hold reason: blank => "No reason"
-        df["HOLD_REASON_CLEAN"] = df["Hold Reason"].apply(lambda x: safe_str(x, "")).astype(str).str.strip()
-        df.loc[df["HOLD_REASON_CLEAN"] == "", "HOLD_REASON_CLEAN"] = "No reason"
-
-        # Model name: blank => "Unknown"
-        df["MODEL_NAME_CLEAN"] = df[model_col].apply(lambda x: safe_str(x, "")).astype(str).str.strip()
-        df.loc[df["MODEL_NAME_CLEAN"] == "", "MODEL_NAME_CLEAN"] = "Unknown"
-
-        # Customer name proper case
-        fn = df["Owner Contact First Name"].apply(lambda x: safe_str(x, "")).astype(str)
-        ln = df["Owner Contact Last Name"].apply(lambda x: safe_str(x, "")).astype(str)
-        df["CUSTOMER_NAME"] = (fn.str.strip() + " " + ln.str.strip()).str.strip()
-        df["CUSTOMER_NAME"] = df["CUSTOMER_NAME"].apply(proper_case_name)
-        df.loc[df["CUSTOMER_NAME"] == "", "CUSTOMER_NAME"] = "Unknown"
-
-        # Money
-        df["RO_AMOUNT_NUM"] = df["Total RO Amount"].apply(clean_money_to_float)
-        df["PARTS_AMOUNT_NUM"] = df["Total Parts Amount"].apply(clean_money_to_float)
-        df["LABOR_AMOUNT_NUM"] = df["Total Labor Amount"].apply(clean_money_to_float)
-
-        # Sort
-        df = df.sort_values("RO_DATE_DT", ascending=False, na_position="last").reset_index(drop=True)
-
-        CACHE["df"] = df
-        CACHE["model_col"] = model_col
-        CACHE["loaded_at"] = now
-        CACHE["error"] = None
-        print(f"[OK] Loaded rows: {len(df)} | source: GoogleSheet CSV | model_col: {model_col}")
+        if IS_RENDER:
+            # Render: read Google Sheets Published CSV
+            resp = requests.get(GOOGLE_SHEET_CSV_URL, timeout=45)
+            resp.raise_for_status()
+            df = pd.read_csv(io.StringIO(resp.text))
+        else:
+            # Local: Excel fallback
+            if not os.path.exists(EXCEL_PATH):
+                DF = pd.DataFrame()
+                MODEL_COL = None
+                print(f"[ERROR] Excel not found: {EXCEL_PATH}")
+                return
+            df = pd.read_excel(EXCEL_PATH, sheet_name=SHEET_NAME)
 
     except Exception as e:
-        CACHE["error"] = str(e)
-        # If cache already has data, keep it
-        if CACHE["df"] is None or CACHE["df"].empty:
-            CACHE["df"] = pd.DataFrame()
-        CACHE["loaded_at"] = now
-        print(f"[ERROR] Load failed: {e}")
+        DF = pd.DataFrame()
+        MODEL_COL = None
+        print("[ERROR] load_data failed:", e)
+        return
 
-def get_df() -> pd.DataFrame:
-    load_data(force=False)
-    return CACHE["df"]
+    df = normalize_column_names(df)
 
-# =========================================================
-# FILTERS
-# =========================================================
+    # Ensure required columns exist
+    for c in REQUIRED_COLS:
+        if c not in df.columns:
+            df[c] = None
+
+    # Model column
+    MODEL_COL = pick_first_existing_column(df, MODEL_CANDIDATES)
+    if MODEL_COL is None:
+        df["Model Name"] = None
+        MODEL_COL = "Model Name"
+
+    # Dates
+    df["RO_DATE_DT"] = df["RO Open Date"].apply(parse_date_any)
+    today = pd.Timestamp(date.today())
+    df["DAYS_OPEN"] = (today - df["RO_DATE_DT"]).dt.days
+    df["DAYS_OPEN"] = df["DAYS_OPEN"].fillna(0).astype(int)
+    df.loc[df["DAYS_OPEN"] < 0, "DAYS_OPEN"] = 0
+    df["AGE_BUCKET"] = df["DAYS_OPEN"].apply(age_bucket_from_days)
+
+    # Hold reason (blank => No reason)
+    df["HOLD_REASON_CLEAN"] = df["Hold Reason"].apply(lambda x: safe_str(x, "")).astype(str).str.strip()
+    df.loc[df["HOLD_REASON_CLEAN"] == "", "HOLD_REASON_CLEAN"] = "No reason"
+
+    # SR Type clean (keep blank as "-")
+    df["SR_TYPE_CLEAN"] = df["SR Type"].apply(lambda x: safe_str(x, "")).astype(str).str.strip()
+    df.loc[df["SR_TYPE_CLEAN"] == "", "SR_TYPE_CLEAN"] = "Unknown"
+
+    # Model name clean
+    df["MODEL_NAME_CLEAN"] = df[MODEL_COL].apply(lambda x: safe_str(x, "")).astype(str).str.strip()
+    df.loc[df["MODEL_NAME_CLEAN"] == "", "MODEL_NAME_CLEAN"] = "Unknown"
+
+    # Customer name Proper Case
+    fn = df["Owner Contact First Name"].apply(lambda x: safe_str(x, "")).astype(str)
+    ln = df["Owner Contact Last Name"].apply(lambda x: safe_str(x, "")).astype(str)
+    df["CUSTOMER_NAME"] = (fn.str.strip() + " " + ln.str.strip()).str.strip()
+    df["CUSTOMER_NAME"] = df["CUSTOMER_NAME"].apply(proper_case_name)
+    df.loc[df["CUSTOMER_NAME"] == "", "CUSTOMER_NAME"] = "Unknown"
+
+    # Money columns
+    df["RO_AMOUNT_NUM"] = df["Total RO Amount"].apply(clean_money_to_float)
+    df["PARTS_AMOUNT_NUM"] = df["Total Parts Amount"].apply(clean_money_to_float)
+    df["LABOR_AMOUNT_NUM"] = df["Total Labor Amount"].apply(clean_money_to_float)
+
+    # Sort latest first
+    df = df.sort_values("RO_DATE_DT", ascending=False, na_position="last").reset_index(drop=True)
+
+    DF = df
+    print(
+        f"[OK] Loaded rows: {len(DF)} | source: {'GoogleSheetCSV' if IS_RENDER else 'Excel'} | model_col: {MODEL_COL}"
+    )
+
+
+load_data()
+
+# =============================================================================
+# FILTERING
+# =============================================================================
 def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
-    out = df.copy()
+    out = df
 
     branch = args.get("branch", "All")
     status = args.get("status", "All")
@@ -290,7 +308,6 @@ def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
     sr_type = args.get("sr_type", "All")
     hold_reason = args.get("hold_reason", "All")
     model_name = args.get("model_name", "All")
-
     reg_search = (args.get("reg_search", "") or "").strip()
     from_date = (args.get("from_date", "") or "").strip()
     to_date = (args.get("to_date", "") or "").strip()
@@ -302,7 +319,7 @@ def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
     if age_bucket and age_bucket != "All":
         out = out[out["AGE_BUCKET"].astype(str) == str(age_bucket)]
     if sr_type and sr_type != "All":
-        out = out[out["SR Type"].astype(str) == str(sr_type)]
+        out = out[out["SR_TYPE_CLEAN"].astype(str) == str(sr_type)]
     if hold_reason and hold_reason != "All":
         out = out[out["HOLD_REASON_CLEAN"].astype(str) == str(hold_reason)]
     if model_name and model_name != "All":
@@ -311,9 +328,6 @@ def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
     if reg_search:
         key = reg_search.upper()
         out = out[out["Vehicle Registration No"].astype(str).str.upper().str.contains(key, na=False)]
-
-    if "RO_DATE_DT" not in out.columns:
-        out["RO_DATE_DT"] = out["RO Open Date"].apply(parse_date_any)
 
     fd = parse_iso_yyyy_mm_dd(from_date) if from_date else None
     td = parse_iso_yyyy_mm_dd(to_date) if to_date else None
@@ -325,13 +339,14 @@ def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
 
     return out
 
+
 def json_row(r) -> dict:
     return {
         "ro_id": safe_str(r.get("Repair Order #")),
         "ro_date": fmt_ddmmyyyy(r.get("RO_DATE_DT")),
         "branch": safe_str(r.get("Dealer Code")),
         "status": safe_str(r.get("Status")),
-        "sr_type": safe_str(r.get("SR Type")),
+        "sr_type": safe_str(r.get("SR_TYPE_CLEAN")),
         "hold_reason": safe_str(r.get("HOLD_REASON_CLEAN")),
         "model_name": safe_str(r.get("MODEL_NAME_CLEAN")),
         "customer_name": safe_str(r.get("CUSTOMER_NAME")),
@@ -345,14 +360,15 @@ def json_row(r) -> dict:
         "total_labor_amount": float(r.get("LABOR_AMOUNT_NUM", 0.0) or 0.0),
     }
 
-# =========================================================
+
+# =============================================================================
 # FLASK APP
-# =========================================================
+# =============================================================================
 app = Flask(__name__)
 
 @app.after_request
 def add_cors_headers(resp):
-    # no flask_cors needed
+    # allow dashboard JS to call APIs
     resp.headers["Access-Control-Allow-Origin"] = "*"
     resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization"
@@ -360,30 +376,16 @@ def add_cors_headers(resp):
 
 @app.route("/health")
 def health():
-    df = get_df()
-    return jsonify({
-        "status": "ok",
-        "rows": int(len(df)) if df is not None else 0,
-        "cache_loaded_at": CACHE["loaded_at"].isoformat() if CACHE["loaded_at"] else None,
-        "cache_seconds": CACHE_SECONDS,
-        "error": CACHE["error"],
-    })
+    return jsonify({"status": "ok", "rows": int(len(DF)) if DF is not None else 0})
 
 @app.route("/api/reload")
 def api_reload():
-    load_data(force=True)
-    df = CACHE["df"]
-    return jsonify({
-        "ok": True,
-        "rows": int(len(df)) if df is not None else 0,
-        "model_col": CACHE["model_col"],
-        "error": CACHE["error"],
-    })
+    load_data()
+    return jsonify({"ok": True, "rows": int(len(DF)), "model_col": MODEL_COL, "source": "GoogleSheetCSV" if IS_RENDER else "Excel"})
 
 @app.route("/api/filter-options")
 def filter_options():
-    df = get_df()
-    if df is None or df.empty:
+    if DF is None or DF.empty:
         return jsonify({
             "branches": ["All"],
             "statuses": ["All"],
@@ -393,14 +395,14 @@ def filter_options():
             "model_names": ["All"],
         })
 
-    branches = ["All"] + sorted([safe_str(x) for x in df["Dealer Code"].dropna().unique().tolist()])
-    statuses = ["All"] + sorted([safe_str(x) for x in df["Status"].dropna().unique().tolist()])
-    sr_types = ["All"] + sorted([safe_str(x) for x in df["SR Type"].dropna().unique().tolist()])
-    hold_reasons = ["All"] + sorted([safe_str(x) for x in df["HOLD_REASON_CLEAN"].dropna().unique().tolist()])
-    model_names = ["All"] + sorted([safe_str(x) for x in df["MODEL_NAME_CLEAN"].dropna().unique().tolist()])
+    branches = ["All"] + sorted([safe_str(x) for x in DF["Dealer Code"].dropna().unique().tolist()])
+    statuses = ["All"] + sorted([safe_str(x) for x in DF["Status"].dropna().unique().tolist()])
+    sr_types = ["All"] + sorted([safe_str(x) for x in DF["SR_TYPE_CLEAN"].dropna().unique().tolist()])
+    hold_reasons = ["All"] + sorted([safe_str(x) for x in DF["HOLD_REASON_CLEAN"].dropna().unique().tolist()])
+    model_names = ["All"] + sorted([safe_str(x) for x in DF["MODEL_NAME_CLEAN"].dropna().unique().tolist()])
 
     age_order = ["0-3 days", "4-10 days", "11-15 days", "16-30 days", "31-60 days", "Above 60"]
-    present = [x for x in age_order if x in set(df["AGE_BUCKET"].astype(str).unique())]
+    present = [x for x in age_order if x in set(DF["AGE_BUCKET"].astype(str).unique())]
     age_buckets = ["All"] + present
 
     return jsonify({
@@ -414,8 +416,7 @@ def filter_options():
 
 @app.route("/api/stats")
 def stats():
-    df = get_df()
-    if df is None or df.empty:
+    if DF is None or DF.empty:
         return jsonify({
             "total_ros": 0,
             "total_ro_amount": 0.0,
@@ -423,7 +424,7 @@ def stats():
             "total_labor_amount": 0.0,
         })
 
-    filtered = apply_filters(df, request.args)
+    filtered = apply_filters(DF, request.args)
     return jsonify({
         "total_ros": int(len(filtered)),
         "total_ro_amount": float(filtered["RO_AMOUNT_NUM"].sum()) if "RO_AMOUNT_NUM" in filtered.columns else 0.0,
@@ -433,15 +434,14 @@ def stats():
 
 @app.route("/api/rows")
 def rows():
-    df = get_df()
-    if df is None or df.empty:
+    if DF is None or DF.empty:
         return jsonify({"total_count": 0, "filtered_count": 0, "rows": []})
 
     limit = int(request.args.get("limit", "50"))
     skip = int(request.args.get("skip", "0"))
 
-    filtered = apply_filters(df, request.args)
-    total_count = int(len(df))
+    filtered = apply_filters(DF, request.args)
+    total_count = int(len(DF))
     filtered_count = int(len(filtered))
 
     page = filtered.iloc[skip: skip + limit] if limit > 0 else filtered
@@ -455,11 +455,10 @@ def rows():
 
 @app.route("/api/export")
 def export_excel():
-    df = get_df()
-    if df is None or df.empty:
+    if DF is None or DF.empty:
         return jsonify({"error": "No data"})
 
-    filtered = apply_filters(df, request.args).copy()
+    filtered = apply_filters(DF, request.args).copy()
     if filtered.empty:
         return jsonify({"error": "No data for filters"})
 
@@ -484,7 +483,6 @@ def export_excel():
         "total_labor_amount": "Total Labor Amount",
     })
 
-    # Neat order (VIN removed, Model added)
     desired_order = [
         "RO ID", "RO Date", "Branch", "Status", "SR Type", "Hold Reason",
         "SA Name", "Reg Number", "Customer Name", "Model Name", "KM",
@@ -507,9 +505,9 @@ def export_excel():
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-# =========================================================
-# FRONTEND (embedded HTML)
-# =========================================================
+# =============================================================================
+# FRONTEND (Embedded HTML)
+# =============================================================================
 HTML = r"""
 <!DOCTYPE html>
 <html lang="en">
@@ -531,7 +529,7 @@ HTML = r"""
         padding:18px 18px;
         border-radius:12px;
         margin-bottom:16px;
-        box-shadow:0 10px 30px rgba(0,0,0,0.1);
+        box-shadow:0 10px 30px rgba(0,0,0,0.10);
         display:flex;
         align-items:center;
         justify-content:space-between;
@@ -560,8 +558,6 @@ HTML = r"""
         font-size:18px;
         box-shadow:0 4px 15px rgba(102,126,234,0.30);
     }
-    .btn-reload{ background:#2d3436; color:#fff; }
-    .btn-reload:hover{ background:#111; }
 
     .stats-grid{
         display:grid;
@@ -634,7 +630,7 @@ HTML = r"""
     table{
         width:100%;
         border-collapse:collapse;
-        min-width: 1500px;
+        min-width: 1600px;
     }
     thead th{
         position:sticky;
@@ -647,6 +643,7 @@ HTML = r"""
         text-transform:uppercase;
         letter-spacing:0.5px;
         text-align:left;
+        white-space:nowrap;
     }
     tbody td{
         border-bottom:1px solid #f0f0f0;
@@ -661,19 +658,14 @@ HTML = r"""
         font-weight:900;
         font-size:11px;
         display:inline-block;
+        white-space:nowrap;
     }
     .badge-green{ background:#dff4df; color:#0b7a28; }
     .badge-amber{ background:#fff0d9; color:#b85d00; }
     .ro-id{ font-weight:900; }
     .reg{ font-weight:900; }
-    .money{ font-weight:900; }
+    .money{ font-weight:900; white-space:nowrap; }
     .muted{ color:#666; }
-    .errorbar{
-        margin-top:8px;
-        font-size:12px;
-        font-weight:700;
-        color:#b00020;
-    }
 
     body.dark{
         background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
@@ -702,12 +694,8 @@ HTML = r"""
 <body>
 <div class="container">
     <header>
-        <div>
-            <h1>Unnati Vehicles Open RO Dashboard</h1>
-            <div class="errorbar" id="errbar" style="display:none;"></div>
-        </div>
+        <h1>Unnati Vehicles Open RO Dashboard</h1>
         <div class="header-actions">
-            <button class="btn btn-reload" id="reloadBtn" title="Reload from Google Sheet">Reload</button>
             <button class="btn btn-theme" id="themeBtn" title="Toggle Theme">🌙</button>
             <button class="btn btn-clear" id="clearBtn">Clear All</button>
         </div>
@@ -786,7 +774,10 @@ HTML = r"""
     <div class="table-wrap">
         <div class="table-header">
             <div class="info" id="tableInfo">Loading...</div>
-            <button class="btn btn-export" id="exportBtn">Export Filtered Data to Excel</button>
+            <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                <button class="btn btn-export" id="reloadBtn">Reload Data</button>
+                <button class="btn btn-export" id="exportBtn">Export Filtered Data to Excel</button>
+            </div>
         </div>
         <div class="scroll">
             <table>
@@ -830,6 +821,7 @@ function badgeClass(status){
     const s = String(status || "").toLowerCase();
     if (s.includes("approved") || s.includes("ready")) return "badge badge-green";
     if (s.includes("hold") || s.includes("await") || s.includes("progress")) return "badge badge-amber";
+    if (s.includes("open")) return "badge badge-amber";
     return "badge badge-green";
 }
 
@@ -856,17 +848,6 @@ function getParams(){
     if (reg_search && reg_search.trim() !== "") p.append("reg_search", reg_search.trim());
 
     return p;
-}
-
-function showErr(msg){
-    const el = document.getElementById("errbar");
-    if (!msg){
-        el.style.display = "none";
-        el.textContent = "";
-        return;
-    }
-    el.style.display = "block";
-    el.textContent = msg;
 }
 
 async function loadFilterOptions(){
@@ -937,7 +918,7 @@ async function loadRows(){
             <td class="reg">${r.reg_number || "-"}</td>
             <td>${r.customer_name || "-"}</td>
             <td>${r.model_name || "-"}</td>
-            <td>${(r.km || 0).toLocaleString("en-IN")}</td>
+            <td>${(Number(r.km || 0)).toLocaleString("en-IN")}</td>
             <td>${r.age_bucket || "-"}</td>
             <td>${r.days || 0}</td>
             <td class="money">${inr(r.total_ro_amount || 0)}</td>
@@ -948,12 +929,6 @@ async function loadRows(){
 }
 
 async function refreshAll(){
-    showErr("");
-    const h = await fetch(`${API}/health`);
-    const health = await h.json();
-    if (health.error){
-        showErr("Data load issue: " + health.error);
-    }
     await loadStats();
     await loadRows();
 }
@@ -1005,10 +980,14 @@ function hookEvents(){
     });
 
     document.getElementById("reloadBtn").addEventListener("click", async () => {
-        showErr("");
-        await fetch(`${API}/api/reload`);
-        await loadFilterOptions();
-        await refreshAll();
+        document.getElementById("tableInfo").textContent = "Reloading data...";
+        try{
+            await fetch(`${API}/api/reload`);
+            await loadFilterOptions();
+            await refreshAll();
+        }catch(e){
+            document.getElementById("tableInfo").textContent = "Reload failed. Please try again.";
+        }
     });
 }
 
@@ -1027,18 +1006,17 @@ function hookEvents(){
 def home():
     return Response(HTML, mimetype="text/html")
 
-# =========================================================
-# LOCAL AUTO-OPEN
-# =========================================================
+
+# =============================================================================
+# MAIN (Local only; Render runs via gunicorn)
+# =============================================================================
 def open_browser():
     try:
-        webbrowser.open(f"http://127.0.0.1:{PORT}", new=2)
+        webbrowser.open(f"http://{HOST}:{PORT}", new=2)
     except Exception:
         pass
 
 if __name__ == "__main__":
-    # local run only
-    load_data(force=True)
-    if AUTO_OPEN_BROWSER and (not IS_RENDER):
+    if AUTO_OPEN_BROWSER and not IS_RENDER:
         threading.Timer(1.0, open_browser).start()
-    app.run(host="127.0.0.1", port=PORT, debug=False)
+    app.run(host=HOST, port=PORT, debug=False)
