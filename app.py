@@ -1,63 +1,51 @@
 import os
 import re
 import io
-import threading
-import webbrowser
 from datetime import datetime, date
+from typing import Optional
 
 import pandas as pd
 import requests
 from flask import Flask, jsonify, request, send_file, Response
 
-# =============================================================================
+# =========================================================
 # CONFIG
-# =============================================================================
-HOST = os.environ.get("HOST", "127.0.0.1")
-PORT = int(os.environ.get("PORT", "5000"))  # Render sets PORT automatically
-AUTO_OPEN_BROWSER = os.environ.get("AUTO_OPEN_BROWSER", "1").strip() == "1"
+# =========================================================
+APP_TITLE = os.environ.get("APP_TITLE", "Unnati Vehicles Open RO Dashboard")
 
-# Render / Google Sheets CSV (Published as CSV)
+# Render provides PORT automatically
+PORT = int(os.environ.get("PORT", "5000"))
+
+# Google Sheet Published CSV (recommended)
 GOOGLE_SHEET_CSV_URL = os.environ.get(
     "GOOGLE_SHEET_CSV_URL",
     "https://docs.google.com/spreadsheets/d/e/2PACX-1vS5ZtziwobOOI3q4nOCyd0bJoQk0IW7GtSeszy23yLveqRZHBZJajVw7BTFngJnREqS8xaIH93RzGOe/pub?gid=0&single=true&output=csv",
 )
 
-# Local Excel fallback
-EXCEL_PATH = os.environ.get("OPEN_RO_XLSX", r"E:\Renault\Open RO.xlsx")
+# Optional fallback to Excel (local only; not useful on Render unless you upload file to repo)
+EXCEL_PATH = os.environ.get("OPEN_RO_XLSX", "")
 SHEET_NAME = os.environ.get("OPEN_RO_SHEET", "Details")
 
-# Render detection
-IS_RENDER = bool(os.environ.get("RENDER")) or ("onrender.com" in os.environ.get("RENDER_EXTERNAL_URL", "")) or (
-    os.environ.get("PORT") is not None and os.environ.get("PORT") != "5000"
-)
+# Cache refresh (seconds)
+CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "120"))
 
-# =============================================================================
+# =========================================================
 # HELPERS
-# =============================================================================
+# =========================================================
 def parse_date_any(v):
-    if v is None:
+    if v is None or (isinstance(v, float) and pd.isna(v)) or pd.isna(v):
         return pd.NaT
-    try:
-        if isinstance(v, float) and pd.isna(v):
-            return pd.NaT
-    except Exception:
-        pass
-
     if isinstance(v, (pd.Timestamp, datetime)):
         return pd.to_datetime(v, errors="coerce")
-
     s = str(v).strip()
-    if s in ["", "-", "nan", "NaT", "None", "null"]:
+    if s in ["", "-", "nan", "NaT", "None"]:
         return pd.NaT
-
     for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%d-%b-%Y", "%d %b %Y"):
         try:
             return pd.to_datetime(s, format=fmt, errors="raise")
         except Exception:
             pass
-
     return pd.to_datetime(s, errors="coerce", dayfirst=True)
-
 
 def parse_iso_yyyy_mm_dd(s):
     s = (s or "").strip()
@@ -69,36 +57,28 @@ def parse_iso_yyyy_mm_dd(s):
         dt = pd.to_datetime(s, errors="coerce", dayfirst=True)
         return None if pd.isna(dt) else dt
 
-
-def clean_money_to_float(x):
-    if x is None:
+def clean_money_to_float(x) -> float:
+    if x is None or (isinstance(x, float) and pd.isna(x)) or pd.isna(x):
         return 0.0
-    try:
-        if isinstance(x, float) and pd.isna(x):
-            return 0.0
-    except Exception:
-        pass
-
     s = str(x).strip()
-    if s in ["", "-", "nan", "NaT", "None", "null"]:
+    if s in ["", "-", "nan", "NaT", "None"]:
         return 0.0
 
-    # remove "Rs", "₹", etc. keep minus and dot
-    s = re.sub(r"(?i)rs\.?", "", s)
+    # Remove currency text like "Rs", "Rs.", "INR", and ₹
+    s = re.sub(r"(?i)\b(rs\.?|inr)\b", "", s)
     s = s.replace("₹", "")
     s = s.replace(",", "").strip()
 
-    # sometimes values look like "Rs 1,234.00" or "1,234" or "1234"
+    # Sometimes value comes like "0.00 " or " 1234"
     try:
         return float(s)
     except Exception:
-        # fallback: keep digits, dot, minus
+        # If it contains any other chars, keep digits+dot+minus only
         s2 = re.sub(r"[^0-9\.\-]", "", s)
         try:
             return float(s2) if s2 else 0.0
         except Exception:
             return 0.0
-
 
 def age_bucket_from_days(days: int) -> str:
     if days <= 3:
@@ -113,44 +93,30 @@ def age_bucket_from_days(days: int) -> str:
         return "31-60 days"
     return "Above 60"
 
-
 def safe_str(v, default="-"):
-    if v is None:
+    if v is None or (isinstance(v, float) and pd.isna(v)) or pd.isna(v):
         return default
-    try:
-        if isinstance(v, float) and pd.isna(v):
-            return default
-    except Exception:
-        pass
     s = str(v).strip()
     return default if s == "" else s
 
-
 def fmt_ddmmyyyy(ts):
-    if ts is None:
+    if ts is None or (isinstance(ts, float) and pd.isna(ts)) or pd.isna(ts):
         return "-"
     try:
-        if isinstance(ts, float) and pd.isna(ts):
+        d = pd.to_datetime(ts, errors="coerce")
+        if pd.isna(d):
             return "-"
+        return d.strftime("%d/%m/%Y")
     except Exception:
-        pass
-
-    d = pd.to_datetime(ts, errors="coerce")
-    if pd.isna(d):
         return "-"
-    return d.strftime("%d/%m/%Y")
-
 
 def to_int_safe(v, default=0):
     try:
-        if v is None:
-            return default
-        if isinstance(v, float) and pd.isna(v):
+        if v is None or (isinstance(v, float) and pd.isna(v)) or pd.isna(v):
             return default
         return int(float(v))
     except Exception:
         return default
-
 
 def pick_first_existing_column(df: pd.DataFrame, candidates):
     if df is None or df.empty:
@@ -163,7 +129,6 @@ def pick_first_existing_column(df: pd.DataFrame, candidates):
             return lower_map[key]
     return None
 
-
 def proper_case_name(s: str) -> str:
     s = (s or "").strip()
     if not s:
@@ -172,26 +137,24 @@ def proper_case_name(s: str) -> str:
     parts = [p[:1].upper() + p[1:].lower() if p else "" for p in parts]
     return " ".join([p for p in parts if p])
 
-
-def normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
-    # Keep original names, but also help matching if some headers have trailing spaces
-    df = df.copy()
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    # Clean column names (trim)
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
-
-# =============================================================================
-# LOAD + PREPARE DATA
-# =============================================================================
+# =========================================================
+# LOAD + PREPARE DATA (with caching)
+# =========================================================
 DF = pd.DataFrame()
 MODEL_COL = None
+_LAST_LOAD_TS: Optional[float] = None
 
 REQUIRED_COLS = [
     "Dealer Code",
     "Repair Order #",
     "RO Open Date",
     "Vehicle Registration No",
-    "VIN #",  # not shown in table, but may exist; we won't use in UI table
+    "VIN #",
     "Odometer Reading",
     "Assigned To Full Name",
     "Status",
@@ -215,39 +178,58 @@ MODEL_CANDIDATES = [
     "MODEL GROUP",
 ]
 
+def _load_from_google_csv(url: str) -> pd.DataFrame:
+    r = requests.get(url, timeout=30)
+    r.raise_for_status()
+    bio = io.BytesIO(r.content)
+    df = pd.read_csv(bio)
+    return df
 
-def load_data():
-    global DF, MODEL_COL
+def _load_from_excel(path: str, sheet: str) -> pd.DataFrame:
+    return pd.read_excel(path, sheet_name=sheet)
 
-    try:
-        if IS_RENDER:
-            # Render: read Google Sheets Published CSV
-            resp = requests.get(GOOGLE_SHEET_CSV_URL, timeout=45)
-            resp.raise_for_status()
-            df = pd.read_csv(io.StringIO(resp.text))
-        else:
-            # Local: Excel fallback
-            if not os.path.exists(EXCEL_PATH):
-                DF = pd.DataFrame()
-                MODEL_COL = None
-                print(f"[ERROR] Excel not found: {EXCEL_PATH}")
-                return
-            df = pd.read_excel(EXCEL_PATH, sheet_name=SHEET_NAME)
+def load_data(force: bool = False):
+    global DF, MODEL_COL, _LAST_LOAD_TS
 
-    except Exception as e:
-        DF = pd.DataFrame()
-        MODEL_COL = None
-        print("[ERROR] load_data failed:", e)
+    now_ts = datetime.utcnow().timestamp()
+    if (not force) and _LAST_LOAD_TS and (now_ts - _LAST_LOAD_TS) < CACHE_TTL_SECONDS and (DF is not None) and (not DF.empty):
         return
 
-    df = normalize_column_names(df)
+    df = None
+    last_error = None
+
+    # 1) Try Google Sheet CSV first
+    if GOOGLE_SHEET_CSV_URL:
+        try:
+            df = _load_from_google_csv(GOOGLE_SHEET_CSV_URL)
+        except Exception as e:
+            last_error = f"Google CSV load failed: {e}"
+
+    # 2) Fallback Excel (mostly for local use)
+    if df is None:
+        if EXCEL_PATH and os.path.exists(EXCEL_PATH):
+            try:
+                df = _load_from_excel(EXCEL_PATH, SHEET_NAME)
+            except Exception as e:
+                last_error = f"Excel load failed: {e}"
+        else:
+            last_error = last_error or "No data source available"
+
+    if df is None:
+        DF = pd.DataFrame()
+        MODEL_COL = None
+        _LAST_LOAD_TS = now_ts
+        print(f"[ERROR] load_data: {last_error}")
+        return
+
+    df = normalize_columns(df)
 
     # Ensure required columns exist
     for c in REQUIRED_COLS:
         if c not in df.columns:
             df[c] = None
 
-    # Model column
+    # Detect model column
     MODEL_COL = pick_first_existing_column(df, MODEL_CANDIDATES)
     if MODEL_COL is None:
         df["Model Name"] = None
@@ -261,46 +243,41 @@ def load_data():
     df.loc[df["DAYS_OPEN"] < 0, "DAYS_OPEN"] = 0
     df["AGE_BUCKET"] = df["DAYS_OPEN"].apply(age_bucket_from_days)
 
-    # Hold reason (blank => No reason)
+    # Hold reason: blank => "No reason"
     df["HOLD_REASON_CLEAN"] = df["Hold Reason"].apply(lambda x: safe_str(x, "")).astype(str).str.strip()
     df.loc[df["HOLD_REASON_CLEAN"] == "", "HOLD_REASON_CLEAN"] = "No reason"
-
-    # SR Type clean (keep blank as "-")
-    df["SR_TYPE_CLEAN"] = df["SR Type"].apply(lambda x: safe_str(x, "")).astype(str).str.strip()
-    df.loc[df["SR_TYPE_CLEAN"] == "", "SR_TYPE_CLEAN"] = "Unknown"
 
     # Model name clean
     df["MODEL_NAME_CLEAN"] = df[MODEL_COL].apply(lambda x: safe_str(x, "")).astype(str).str.strip()
     df.loc[df["MODEL_NAME_CLEAN"] == "", "MODEL_NAME_CLEAN"] = "Unknown"
 
-    # Customer name Proper Case
+    # Customer name = First + Last (Proper Case)
     fn = df["Owner Contact First Name"].apply(lambda x: safe_str(x, "")).astype(str)
     ln = df["Owner Contact Last Name"].apply(lambda x: safe_str(x, "")).astype(str)
     df["CUSTOMER_NAME"] = (fn.str.strip() + " " + ln.str.strip()).str.strip()
     df["CUSTOMER_NAME"] = df["CUSTOMER_NAME"].apply(proper_case_name)
     df.loc[df["CUSTOMER_NAME"] == "", "CUSTOMER_NAME"] = "Unknown"
 
-    # Money columns
+    # Money columns (important: your sheet has "Rs" text)
     df["RO_AMOUNT_NUM"] = df["Total RO Amount"].apply(clean_money_to_float)
     df["PARTS_AMOUNT_NUM"] = df["Total Parts Amount"].apply(clean_money_to_float)
     df["LABOR_AMOUNT_NUM"] = df["Total Labor Amount"].apply(clean_money_to_float)
 
-    # Sort latest first
+    # Sort by latest RO date
     df = df.sort_values("RO_DATE_DT", ascending=False, na_position="last").reset_index(drop=True)
 
     DF = df
-    print(
-        f"[OK] Loaded rows: {len(DF)} | source: {'GoogleSheetCSV' if IS_RENDER else 'Excel'} | model_col: {MODEL_COL}"
-    )
+    _LAST_LOAD_TS = now_ts
+    print(f"[OK] Loaded rows: {len(DF)} | model_col: {MODEL_COL} | source: {'google_csv' if GOOGLE_SHEET_CSV_URL else 'excel'}")
 
+# initial load
+load_data(force=True)
 
-load_data()
-
-# =============================================================================
+# =========================================================
 # FILTERING
-# =============================================================================
+# =========================================================
 def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
-    out = df
+    out = df.copy()
 
     branch = args.get("branch", "All")
     status = args.get("status", "All")
@@ -319,7 +296,7 @@ def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
     if age_bucket and age_bucket != "All":
         out = out[out["AGE_BUCKET"].astype(str) == str(age_bucket)]
     if sr_type and sr_type != "All":
-        out = out[out["SR_TYPE_CLEAN"].astype(str) == str(sr_type)]
+        out = out[out["SR Type"].astype(str) == str(sr_type)]
     if hold_reason and hold_reason != "All":
         out = out[out["HOLD_REASON_CLEAN"].astype(str) == str(hold_reason)]
     if model_name and model_name != "All":
@@ -328,6 +305,9 @@ def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
     if reg_search:
         key = reg_search.upper()
         out = out[out["Vehicle Registration No"].astype(str).str.upper().str.contains(key, na=False)]
+
+    if "RO_DATE_DT" not in out.columns:
+        out["RO_DATE_DT"] = out["RO Open Date"].apply(parse_date_any)
 
     fd = parse_iso_yyyy_mm_dd(from_date) if from_date else None
     td = parse_iso_yyyy_mm_dd(to_date) if to_date else None
@@ -339,14 +319,13 @@ def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
 
     return out
 
-
 def json_row(r) -> dict:
     return {
         "ro_id": safe_str(r.get("Repair Order #")),
         "ro_date": fmt_ddmmyyyy(r.get("RO_DATE_DT")),
         "branch": safe_str(r.get("Dealer Code")),
         "status": safe_str(r.get("Status")),
-        "sr_type": safe_str(r.get("SR_TYPE_CLEAN")),
+        "sr_type": safe_str(r.get("SR Type")),
         "hold_reason": safe_str(r.get("HOLD_REASON_CLEAN")),
         "model_name": safe_str(r.get("MODEL_NAME_CLEAN")),
         "customer_name": safe_str(r.get("CUSTOMER_NAME")),
@@ -360,15 +339,13 @@ def json_row(r) -> dict:
         "total_labor_amount": float(r.get("LABOR_AMOUNT_NUM", 0.0) or 0.0),
     }
 
-
-# =============================================================================
+# =========================================================
 # FLASK APP
-# =============================================================================
+# =========================================================
 app = Flask(__name__)
 
 @app.after_request
 def add_cors_headers(resp):
-    # allow dashboard JS to call APIs
     resp.headers["Access-Control-Allow-Origin"] = "*"
     resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization"
@@ -376,15 +353,17 @@ def add_cors_headers(resp):
 
 @app.route("/health")
 def health():
+    load_data(force=False)
     return jsonify({"status": "ok", "rows": int(len(DF)) if DF is not None else 0})
 
 @app.route("/api/reload")
 def api_reload():
-    load_data()
-    return jsonify({"ok": True, "rows": int(len(DF)), "model_col": MODEL_COL, "source": "GoogleSheetCSV" if IS_RENDER else "Excel"})
+    load_data(force=True)
+    return jsonify({"ok": True, "rows": int(len(DF)), "model_col": MODEL_COL})
 
 @app.route("/api/filter-options")
 def filter_options():
+    load_data(force=False)
     if DF is None or DF.empty:
         return jsonify({
             "branches": ["All"],
@@ -397,7 +376,7 @@ def filter_options():
 
     branches = ["All"] + sorted([safe_str(x) for x in DF["Dealer Code"].dropna().unique().tolist()])
     statuses = ["All"] + sorted([safe_str(x) for x in DF["Status"].dropna().unique().tolist()])
-    sr_types = ["All"] + sorted([safe_str(x) for x in DF["SR_TYPE_CLEAN"].dropna().unique().tolist()])
+    sr_types = ["All"] + sorted([safe_str(x) for x in DF["SR Type"].dropna().unique().tolist()])
     hold_reasons = ["All"] + sorted([safe_str(x) for x in DF["HOLD_REASON_CLEAN"].dropna().unique().tolist()])
     model_names = ["All"] + sorted([safe_str(x) for x in DF["MODEL_NAME_CLEAN"].dropna().unique().tolist()])
 
@@ -416,6 +395,7 @@ def filter_options():
 
 @app.route("/api/stats")
 def stats():
+    load_data(force=False)
     if DF is None or DF.empty:
         return jsonify({
             "total_ros": 0,
@@ -434,6 +414,7 @@ def stats():
 
 @app.route("/api/rows")
 def rows():
+    load_data(force=False)
     if DF is None or DF.empty:
         return jsonify({"total_count": 0, "filtered_count": 0, "rows": []})
 
@@ -455,6 +436,7 @@ def rows():
 
 @app.route("/api/export")
 def export_excel():
+    load_data(force=False)
     if DF is None or DF.empty:
         return jsonify({"error": "No data"})
 
@@ -484,9 +466,9 @@ def export_excel():
     })
 
     desired_order = [
-        "RO ID", "RO Date", "Branch", "Status", "SR Type", "Hold Reason",
-        "SA Name", "Reg Number", "Customer Name", "Model Name", "KM",
-        "Age Bucket", "Days", "Total RO Amount", "Total Parts Amount", "Total Labor Amount"
+        "RO ID","RO Date","Branch","Status","SR Type","Hold Reason",
+        "SA Name","Reg Number","Customer Name","Model Name","KM",
+        "Age Bucket","Days","Total RO Amount","Total Parts Amount","Total Labor Amount"
     ]
     existing = [c for c in desired_order if c in export_df.columns]
     remaining = [c for c in export_df.columns if c not in existing]
@@ -505,9 +487,9 @@ def export_excel():
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-# =============================================================================
-# FRONTEND (Embedded HTML)
-# =============================================================================
+# =========================================================
+# FRONTEND (embedded HTML)
+# =========================================================
 HTML = r"""
 <!DOCTYPE html>
 <html lang="en">
@@ -529,7 +511,7 @@ HTML = r"""
         padding:18px 18px;
         border-radius:12px;
         margin-bottom:16px;
-        box-shadow:0 10px 30px rgba(0,0,0,0.10);
+        box-shadow:0 10px 30px rgba(0,0,0,0.1);
         display:flex;
         align-items:center;
         justify-content:space-between;
@@ -630,7 +612,7 @@ HTML = r"""
     table{
         width:100%;
         border-collapse:collapse;
-        min-width: 1600px;
+        min-width: 1500px;
     }
     thead th{
         position:sticky;
@@ -643,7 +625,6 @@ HTML = r"""
         text-transform:uppercase;
         letter-spacing:0.5px;
         text-align:left;
-        white-space:nowrap;
     }
     tbody td{
         border-bottom:1px solid #f0f0f0;
@@ -658,13 +639,12 @@ HTML = r"""
         font-weight:900;
         font-size:11px;
         display:inline-block;
-        white-space:nowrap;
     }
     .badge-green{ background:#dff4df; color:#0b7a28; }
     .badge-amber{ background:#fff0d9; color:#b85d00; }
     .ro-id{ font-weight:900; }
     .reg{ font-weight:900; }
-    .money{ font-weight:900; white-space:nowrap; }
+    .money{ font-weight:900; }
     .muted{ color:#666; }
 
     body.dark{
@@ -774,10 +754,7 @@ HTML = r"""
     <div class="table-wrap">
         <div class="table-header">
             <div class="info" id="tableInfo">Loading...</div>
-            <div style="display:flex; gap:10px; flex-wrap:wrap;">
-                <button class="btn btn-export" id="reloadBtn">Reload Data</button>
-                <button class="btn btn-export" id="exportBtn">Export Filtered Data to Excel</button>
-            </div>
+            <button class="btn btn-export" id="exportBtn">Export Filtered Data to Excel</button>
         </div>
         <div class="scroll">
             <table>
@@ -791,7 +768,6 @@ HTML = r"""
                         <th>Hold Reason</th>
                         <th>SA Name</th>
                         <th>Reg Number</th>
-                        <th>Customer Name</th>
                         <th>Model Name</th>
                         <th>KM</th>
                         <th>Age Bucket</th>
@@ -802,7 +778,7 @@ HTML = r"""
                     </tr>
                 </thead>
                 <tbody id="tbody">
-                    <tr><td colspan="16" class="muted">Loading...</td></tr>
+                    <tr><td colspan="15" class="muted">Loading...</td></tr>
                 </tbody>
             </table>
         </div>
@@ -821,7 +797,6 @@ function badgeClass(status){
     const s = String(status || "").toLowerCase();
     if (s.includes("approved") || s.includes("ready")) return "badge badge-green";
     if (s.includes("hold") || s.includes("await") || s.includes("progress")) return "badge badge-amber";
-    if (s.includes("open")) return "badge badge-amber";
     return "badge badge-green";
 }
 
@@ -901,7 +876,7 @@ async function loadRows(){
     tb.innerHTML = "";
 
     if (rows.length === 0){
-        tb.innerHTML = `<tr><td colspan="16" class="muted">No data found</td></tr>`;
+        tb.innerHTML = `<tr><td colspan="15" class="muted">No data found</td></tr>`;
         return;
     }
 
@@ -916,9 +891,8 @@ async function loadRows(){
             <td>${r.hold_reason || "-"}</td>
             <td>${r.sa_name || "-"}</td>
             <td class="reg">${r.reg_number || "-"}</td>
-            <td>${r.customer_name || "-"}</td>
             <td>${r.model_name || "-"}</td>
-            <td>${(Number(r.km || 0)).toLocaleString("en-IN")}</td>
+            <td>${(r.km || 0).toLocaleString("en-IN")}</td>
             <td>${r.age_bucket || "-"}</td>
             <td>${r.days || 0}</td>
             <td class="money">${inr(r.total_ro_amount || 0)}</td>
@@ -978,17 +952,6 @@ function hookEvents(){
         const url = `${API}/api/export?${p.toString()}`;
         window.location.href = url;
     });
-
-    document.getElementById("reloadBtn").addEventListener("click", async () => {
-        document.getElementById("tableInfo").textContent = "Reloading data...";
-        try{
-            await fetch(`${API}/api/reload`);
-            await loadFilterOptions();
-            await refreshAll();
-        }catch(e){
-            document.getElementById("tableInfo").textContent = "Reload failed. Please try again.";
-        }
-    });
 }
 
 (async function main(){
@@ -1004,19 +967,14 @@ function hookEvents(){
 
 @app.route("/")
 def home():
-    return Response(HTML, mimetype="text/html")
+    return Response(HTML.replace("<h1>Unnati Vehicles Open RO Dashboard</h1>", f"<h1>{APP_TITLE}</h1>")
+                    .replace("<title>Unnati Vehicles Open RO Dashboard</title>", f"<title>{APP_TITLE}</title>"),
+                    mimetype="text/html")
 
-
-# =============================================================================
-# MAIN (Local only; Render runs via gunicorn)
-# =============================================================================
-def open_browser():
-    try:
-        webbrowser.open(f"http://{HOST}:{PORT}", new=2)
-    except Exception:
-        pass
-
+# =========================================================
+# MAIN
+# =========================================================
+# NOTE: On Render we do NOT call app.run(). Gunicorn will run the app.
+# For local run: python app.py
 if __name__ == "__main__":
-    if AUTO_OPEN_BROWSER and not IS_RENDER:
-        threading.Timer(1.0, open_browser).start()
-    app.run(host=HOST, port=PORT, debug=False)
+    app.run(host="0.0.0.0", port=PORT, debug=False)
