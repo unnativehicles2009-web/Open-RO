@@ -6,7 +6,9 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.12.10
       - key: GOOGLE_SHEET_CSV_URL
         value: https://docs.google.com/spreadsheets/d/e/2PACX-1vS5ZtziwobOOI3q4nOCyd0bJoQk0IW7GtSeszy23yLveqRZHBZJajVw7BTFngJnREqS8xaIH93RzGOe/pub?gid=0&single=true&output=csv
+      - key: CACHE_TTL_SECONDS
+        value: "120"
+      - key: APP_TITLE
+        value: Unnati Vehicles Open RO Dashboard
