@@ -328,31 +328,37 @@ load_data(force=True)
 # =========================================================
 # FILTERING
 # =========================================================
+def _multi(args, key):
+    """Return list of selected values for a filter key (supports comma-separated)."""
+    raw = args.get(key, "") or ""
+    vals = [v.strip() for v in raw.split(",") if v.strip() and v.strip() != "All"]
+    return vals
+
 def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
     out = df.copy()
 
-    branch = args.get("branch", "All")
-    status = args.get("status", "All")
-    age_bucket = args.get("age_bucket", "All")
-    sr_type = args.get("sr_type", "All")
-    hold_reason = args.get("hold_reason", "All")
-    model_name = args.get("model_name", "All")
-    reg_search = (args.get("reg_search", "") or "").strip()
-    from_date = (args.get("from_date", "") or "").strip()
-    to_date = (args.get("to_date", "") or "").strip()
+    branches    = _multi(args, "branch")
+    statuses    = _multi(args, "status")
+    age_buckets = _multi(args, "age_bucket")
+    sr_types    = _multi(args, "sr_type")
+    hold_reasons= _multi(args, "hold_reason")
+    model_names = _multi(args, "model_name")
+    reg_search  = (args.get("reg_search", "") or "").strip()
+    from_date   = (args.get("from_date", "") or "").strip()
+    to_date     = (args.get("to_date", "") or "").strip()
 
-    if branch and branch != "All":
-        out = out[out["Dealer Code"].astype(str) == str(branch)]
-    if status and status != "All":
-        out = out[out["Status"].astype(str) == str(status)]
-    if age_bucket and age_bucket != "All":
-        out = out[out["AGE_BUCKET"].astype(str) == str(age_bucket)]
-    if sr_type and sr_type != "All":
-        out = out[out["SR Type"].astype(str) == str(sr_type)]
-    if hold_reason and hold_reason != "All":
-        out = out[out["HOLD_REASON_CLEAN"].astype(str) == str(hold_reason)]
-    if model_name and model_name != "All":
-        out = out[out["MODEL_NAME_CLEAN"].astype(str) == str(model_name)]
+    if branches:
+        out = out[out["Dealer Code"].astype(str).isin(branches)]
+    if statuses:
+        out = out[out["Status"].astype(str).isin(statuses)]
+    if age_buckets:
+        out = out[out["AGE_BUCKET"].astype(str).isin(age_buckets)]
+    if sr_types:
+        out = out[out["SR Type"].astype(str).isin(sr_types)]
+    if hold_reasons:
+        out = out[out["HOLD_REASON_CLEAN"].astype(str).isin(hold_reasons)]
+    if model_names:
+        out = out[out["MODEL_NAME_CLEAN"].astype(str).isin(model_names)]
 
     if reg_search:
         key = reg_search.upper()
@@ -570,473 +576,447 @@ HTML = r"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>Unnati Vehicles Open RO Dashboard</title>
 <style>
-    * { margin:0; padding:0; box-sizing:border-box; }
-    body{
-        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        min-height: 100vh;
-        padding: 18px;
-    }
-    .container{ max-width: 1400px; margin: 0 auto; }
-    header{
-        background:#fff;
-        padding:18px 18px;
-        border-radius:12px;
-        margin-bottom:16px;
-        box-shadow:0 10px 30px rgba(0,0,0,0.1);
-        display:flex;
-        align-items:center;
-        justify-content:space-between;
-        gap:10px;
-        flex-wrap:wrap;
-    }
-    h1{ font-size:28px; color:#111; }
-    .header-actions{ display:flex; gap:10px; align-items:center; }
-    .btn{
-        border:none;
-        border-radius:10px;
-        padding:10px 14px;
-        font-weight:700;
-        cursor:pointer;
-        font-size:13px;
-        transition: transform 0.15s ease;
-    }
-    .btn:active{ transform: scale(0.98); }
-    .btn-clear{ background:#e74c3c; color:#fff; }
-    .btn-clear:hover{ background:#c0392b; }
-    .btn-theme{
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color:#fff;
-        width:46px; height:46px;
-        display:flex; align-items:center; justify-content:center;
-        font-size:18px;
-        box-shadow:0 4px 15px rgba(102,126,234,0.30);
-    }
+*{margin:0;padding:0;box-sizing:border-box;}
+body{font-family:'Segoe UI',sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;padding:18px;}
+.container{max-width:1400px;margin:0 auto;}
+header{background:#fff;padding:16px 18px;border-radius:12px;margin-bottom:16px;box-shadow:0 10px 30px rgba(0,0,0,.1);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;}
+h1{font-size:26px;color:#111;}
+.header-actions{display:flex;gap:10px;align-items:center;}
+.btn{border:none;border-radius:10px;padding:10px 16px;font-weight:700;cursor:pointer;font-size:13px;transition:transform .15s;}
+.btn:active{transform:scale(.97);}
+.btn-clear{background:#e74c3c;color:#fff;}
+.btn-clear:hover{background:#c0392b;}
+.btn-theme{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;width:44px;height:44px;display:flex;align-items:center;justify-content:center;font-size:18px;box-shadow:0 4px 15px rgba(102,126,234,.3);}
 
-    .stats-grid{
-        display:grid;
-        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-        gap: 14px;
-        margin-bottom: 14px;
-    }
-    .card{
-        background:#fff;
-        border-radius:12px;
-        padding:16px;
-        box-shadow:0 5px 15px rgba(0,0,0,0.10);
-        text-align:center;
-    }
-    .card .label{ font-size:11px; letter-spacing:0.6px; color:#666; font-weight:800; text-transform:uppercase; }
-    .card .value{ margin-top:10px; font-size:28px; color:#667eea; font-weight:900; }
-    .card.grad{
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color:#fff;
-    }
-    .card.grad .label{ color: rgba(255,255,255,0.85); }
-    .card.grad .value{ color:#fff; font-size:24px; }
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-bottom:14px;}
+.card{background:#fff;border-radius:12px;padding:16px;box-shadow:0 5px 15px rgba(0,0,0,.1);text-align:center;}
+.card .label{font-size:11px;letter-spacing:.6px;color:#666;font-weight:800;text-transform:uppercase;}
+.card .value{margin-top:10px;font-size:28px;color:#667eea;font-weight:900;}
+.card.grad{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;}
+.card.grad .label{color:rgba(255,255,255,.85);}
+.card.grad .value{color:#fff;font-size:22px;}
 
-    .filters{
-        background:#fff;
-        border-radius:12px;
-        padding:14px;
-        box-shadow:0 5px 15px rgba(0,0,0,0.10);
-        margin-bottom: 14px;
-    }
-    .filters-grid{
-        display:grid;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-        gap:12px;
-    }
-    label{ display:block; font-size:12px; font-weight:800; color:#111; margin-bottom:6px; }
-    select, input{
-        width:100%;
-        padding:10px;
-        border-radius:10px;
-        border:1px solid #ddd;
-        font-size:13px;
-        outline:none;
-    }
+.filters{background:#fff;border-radius:12px;padding:14px;box-shadow:0 5px 15px rgba(0,0,0,.1);margin-bottom:14px;}
+.filters-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;}
+.flabel{display:block;font-size:12px;font-weight:800;color:#111;margin-bottom:6px;}
+input[type=date],input[type=text],select{width:100%;padding:10px;border-radius:10px;border:1px solid #ddd;font-size:13px;outline:none;background:#fff;color:#111;}
 
-    .table-wrap{
-        background:#fff;
-        border-radius:12px;
-        box-shadow:0 5px 15px rgba(0,0,0,0.10);
-        overflow:hidden;
-    }
-    .table-header{
-        display:flex;
-        align-items:center;
-        justify-content:space-between;
-        padding:12px 14px;
-        background:#f7f7f7;
-        border-bottom:1px solid #e7e7e7;
-        gap:10px;
-        flex-wrap:wrap;
-    }
-    .info{ font-size:12px; color:#444; font-weight:700; }
-    .btn-export{ background:#27ae60; color:#fff; }
-    .btn-export:hover{ background:#229954; }
+/* ── Multi-Select Dropdown ── */
+.ms-wrap{position:relative;}
+.ms-trigger{width:100%;padding:10px 34px 10px 10px;border-radius:10px;border:1px solid #ddd;background:#fff;font-size:13px;font-weight:600;cursor:pointer;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#111;position:relative;}
+.ms-trigger::after{content:"▾";position:absolute;right:10px;top:50%;transform:translateY(-50%);font-size:11px;color:#888;pointer-events:none;}
+.ms-trigger.active{border-color:#667eea;box-shadow:0 0 0 2px rgba(102,126,234,.2);}
 
-    .scroll{
-        overflow:auto;
-        max-height: 560px;
-    }
-    table{
-        width:100%;
-        border-collapse:collapse;
-        min-width: 1500px;
-    }
-    thead th{
-        position:sticky;
-        top:0;
-        background:#fff;
-        z-index:10;
-        border-bottom:2px solid #eee;
-        padding:12px 10px;
-        font-size:11px;
-        text-transform:uppercase;
-        letter-spacing:0.5px;
-        text-align:left;
-    }
-    tbody td{
-        border-bottom:1px solid #f0f0f0;
-        padding:12px 10px;
-        font-size:12px;
-        vertical-align:top;
-    }
-    tbody tr:hover{ background:#fafafa; }
-    .badge{
-        padding:6px 10px;
-        border-radius:999px;
-        font-weight:900;
-        font-size:11px;
-        display:inline-block;
-    }
-    .badge-green{ background:#dff4df; color:#0b7a28; }
-    .badge-amber{ background:#fff0d9; color:#b85d00; }
-    .ro-id{ font-weight:900; }
-    .reg{ font-weight:900; }
-    .money{ font-weight:900; }
-    .muted{ color:#666; }
+/* Panel renders fixed to viewport — never clipped by any parent */
+.ms-panel{position:fixed;z-index:99999;background:#fff;border:1px solid #ddd;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.18);padding:10px;display:none;min-width:200px;max-height:280px;overflow:hidden;flex-direction:column;}
+.ms-panel.open{display:flex;}
+.ms-search{width:100%;padding:9px 10px;border-radius:8px;border:1px solid #e0e0e0;font-size:13px;outline:none;margin-bottom:8px;flex-shrink:0;}
+.ms-actions{display:flex;gap:6px;margin-bottom:8px;flex-shrink:0;}
+.ms-actions button{border:none;border-radius:8px;padding:6px 10px;font-size:12px;font-weight:700;cursor:pointer;background:#f3f3f3;color:#333;}
+.ms-actions button:hover{background:#e8e8e8;}
+.ms-list{overflow-y:auto;flex:1;}
+.ms-item{display:flex;align-items:center;gap:8px;padding:7px 6px;border-radius:8px;cursor:pointer;user-select:none;}
+.ms-item:hover{background:#f5f5ff;}
+.ms-item input[type=checkbox]{width:15px;height:15px;cursor:pointer;accent-color:#667eea;flex-shrink:0;}
+.ms-item .ms-txt{font-size:13px;color:#222;}
+.ms-item.all-row .ms-txt{font-weight:700;color:#667eea;}
 
-    body.dark{
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-        color:#e0e0e0;
-    }
-    body.dark header,
-    body.dark .card,
-    body.dark .filters,
-    body.dark .table-wrap{
-        background:#2d3561;
-        color:#e0e0e0;
-        box-shadow:0 5px 15px rgba(0,0,0,0.30);
-    }
-    body.dark h1{ color:#e0e0e0; }
-    body.dark .table-header{ background:#3a4575; border-bottom-color:#4a5585; }
-    body.dark select, body.dark input{
-        background:#3a4575;
-        color:#e0e0e0;
-        border-color:#4a5585;
-    }
-    body.dark thead th{ background:#2d3561; color:#e0e0e0; border-bottom-color:#3a4575; }
-    body.dark tbody td{ border-bottom-color:#3a4575; color:#e0e0e0; }
-    body.dark tbody tr:hover{ background:#3a4575; }
+.table-wrap{background:#fff;border-radius:12px;box-shadow:0 5px 15px rgba(0,0,0,.1);overflow:hidden;}
+.table-header{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:#f7f7f7;border-bottom:1px solid #e7e7e7;gap:10px;flex-wrap:wrap;}
+.info{font-size:12px;color:#444;font-weight:700;}
+.btn-export{background:#27ae60;color:#fff;}
+.btn-export:hover{background:#229954;}
+.scroll{overflow:auto;max-height:560px;}
+table{width:100%;border-collapse:collapse;min-width:1500px;}
+thead th{position:sticky;top:0;background:#fff;z-index:10;border-bottom:2px solid #eee;padding:12px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;text-align:left;}
+tbody td{border-bottom:1px solid #f0f0f0;padding:12px 10px;font-size:12px;vertical-align:top;}
+tbody tr:hover{background:#fafafa;}
+.badge{padding:5px 10px;border-radius:999px;font-weight:900;font-size:11px;display:inline-block;}
+.badge-green{background:#dff4df;color:#0b7a28;}
+.badge-amber{background:#fff0d9;color:#b85d00;}
+.ro-id,.reg,.money{font-weight:900;}
+.muted{color:#666;}
+
+/* Dark theme */
+body.dark{background:linear-gradient(135deg,#1a1a2e,#16213e);color:#e0e0e0;}
+body.dark header,body.dark .card,body.dark .filters,body.dark .table-wrap{background:#2d3561;color:#e0e0e0;box-shadow:0 5px 15px rgba(0,0,0,.3);}
+body.dark h1{color:#e0e0e0;}
+body.dark .table-header{background:#3a4575;border-bottom-color:#4a5585;}
+body.dark input[type=date],body.dark input[type=text],body.dark select{background:#3a4575;color:#e0e0e0;border-color:#4a5585;}
+body.dark thead th{background:#2d3561;color:#e0e0e0;border-bottom-color:#3a4575;}
+body.dark tbody td{border-bottom-color:#3a4575;color:#e0e0e0;}
+body.dark tbody tr:hover{background:#3a4575;}
+body.dark .ms-trigger{background:#3a4575;border-color:#4a5585;color:#e0e0e0;}
+body.dark .ms-trigger.active{border-color:#667eea;}
+body.dark .ms-panel{background:#2d3561;border-color:#4a5585;}
+body.dark .ms-search{background:#3a4575;border-color:#4a5585;color:#e0e0e0;}
+body.dark .ms-actions button{background:#3a4575;color:#e0e0e0;}
+body.dark .ms-actions button:hover{background:#4a5585;}
+body.dark .ms-item:hover{background:#3a4575;}
+body.dark .ms-item .ms-txt{color:#e0e0e0;}
+body.dark .ms-item.all-row .ms-txt{color:#a0b4ff;}
+body.dark .flabel{color:#ccc;}
 </style>
 </head>
 <body>
 <div class="container">
-    <header>
-        <h1>Unnati Vehicles Open RO Dashboard</h1>
-        <div class="header-actions">
-            <button class="btn btn-theme" id="themeBtn" title="Toggle Theme">🌙</button>
-            <button class="btn btn-clear" id="clearBtn">Clear All</button>
-        </div>
-    </header>
-
-    <div class="stats-grid">
-        <div class="card">
-            <div class="label">Total ROs</div>
-            <div class="value" id="kpi_total_ros">0</div>
-        </div>
-        <div class="card grad">
-            <div class="label">Total RO Amount</div>
-            <div class="value" id="kpi_ro_amt">₹0.00</div>
-        </div>
-        <div class="card grad">
-            <div class="label">Total Parts Amount</div>
-            <div class="value" id="kpi_parts_amt">₹0.00</div>
-        </div>
-        <div class="card grad">
-            <div class="label">Total Labor Amount</div>
-            <div class="value" id="kpi_labor_amt">₹0.00</div>
-        </div>
+  <header>
+    <h1>Unnati Vehicles Open RO Dashboard</h1>
+    <div class="header-actions">
+      <button class="btn btn-theme" id="themeBtn" title="Toggle Theme">🌙</button>
+      <button class="btn btn-clear" id="clearBtn">Clear All</button>
     </div>
+  </header>
 
-    <div class="filters">
-        <div class="filters-grid">
-            <div>
-                <label>Branch</label>
-                <select id="branch"></select>
-            </div>
-            <div>
-                <label>RO Status</label>
-                <select id="status"></select>
-            </div>
-            <div>
-                <label>Age Bucket</label>
-                <select id="age_bucket"></select>
-            </div>
-            <div>
-                <label>SR Type</label>
-                <select id="sr_type"></select>
-            </div>
-            <div>
-                <label>Hold Reason</label>
-                <select id="hold_reason"></select>
-            </div>
-            <div>
-                <label>Model Name</label>
-                <select id="model_name"></select>
-            </div>
-            <div>
-                <label>From Date</label>
-                <input type="date" id="from_date"/>
-            </div>
-            <div>
-                <label>To Date</label>
-                <input type="date" id="to_date"/>
-            </div>
-            <div>
-                <label>Reg. Number (Search)</label>
-                <input type="text" id="reg_search" placeholder="Enter registration number..."/>
-            </div>
-            <div>
-                <label>Records</label>
-                <select id="limit">
-                    <option value="10">10 Records</option>
-                    <option value="20">20 Records</option>
-                    <option value="50" selected>50 Records</option>
-                    <option value="100">100 Records</option>
-                    <option value="500">500 Records</option>
-                </select>
-            </div>
-        </div>
-    </div>
+  <div class="stats-grid">
+    <div class="card"><div class="label">Total ROs</div><div class="value" id="kpi_total_ros">0</div></div>
+    <div class="card grad"><div class="label">Total RO Amount</div><div class="value" id="kpi_ro_amt">₹0.00</div></div>
+    <div class="card grad"><div class="label">Total Parts Amount</div><div class="value" id="kpi_parts_amt">₹0.00</div></div>
+    <div class="card grad"><div class="label">Total Labor Amount</div><div class="value" id="kpi_labor_amt">₹0.00</div></div>
+  </div>
 
-    <div class="table-wrap">
-        <div class="table-header">
-            <div class="info" id="tableInfo">Loading...</div>
-            <button class="btn btn-export" id="exportBtn">Export Filtered Data to Excel</button>
-        </div>
-        <div class="scroll">
-            <table>
-                <thead>
-                    <tr>
-                        <th>RO ID</th>
-                        <th>RO Date</th>
-                        <th>Branch</th>
-                        <th>Status</th>
-                        <th>SR Type</th>
-                        <th>Hold Reason</th>
-                        <th>SA Name</th>
-                        <th>Reg Number</th>
-                        <th>Customer Name</th>
-                        <th>Model Name</th>
-                        <th>KM</th>
-                        <th>Age Bucket</th>
-                        <th>Days</th>
-                        <th>Total RO Amount</th>
-                        <th>Total Parts Amount</th>
-                        <th>Total Labor Amount</th>
-                    </tr>
-                </thead>
-                <tbody id="tbody">
-                    <tr><td colspan="16" class="muted">Loading...</td></tr>
-                </tbody>
-            </table>
-        </div>
+  <div class="filters">
+    <div class="filters-grid">
+      <div><span class="flabel">Branch</span>         <div class="ms-wrap" id="ms_branch"></div></div>
+      <div><span class="flabel">RO Status</span>      <div class="ms-wrap" id="ms_status"></div></div>
+      <div><span class="flabel">Age Bucket</span>     <div class="ms-wrap" id="ms_age_bucket"></div></div>
+      <div><span class="flabel">SR Type</span>        <div class="ms-wrap" id="ms_sr_type"></div></div>
+      <div><span class="flabel">Hold Reason</span>    <div class="ms-wrap" id="ms_hold_reason"></div></div>
+      <div><span class="flabel">Model Name</span>     <div class="ms-wrap" id="ms_model_name"></div></div>
+      <div><span class="flabel">From Date</span>      <input type="date" id="from_date"/></div>
+      <div><span class="flabel">To Date</span>        <input type="date" id="to_date"/></div>
+      <div><span class="flabel">Reg. Number</span>    <input type="text" id="reg_search" placeholder="Search registration..."/></div>
+      <div><span class="flabel">Records</span>
+        <select id="limit">
+          <option value="10">10 Records</option>
+          <option value="20">20 Records</option>
+          <option value="50" selected>50 Records</option>
+          <option value="100">100 Records</option>
+          <option value="500">500 Records</option>
+        </select>
+      </div>
     </div>
+  </div>
+
+  <div class="table-wrap">
+    <div class="table-header">
+      <div class="info" id="tableInfo">Loading...</div>
+      <button class="btn btn-export" id="exportBtn">Export Filtered Data to Excel</button>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th>RO ID</th><th>RO Date</th><th>Branch</th><th>Status</th>
+          <th>SR Type</th><th>Hold Reason</th><th>SA Name</th><th>Reg Number</th>
+          <th>Customer Name</th><th>Model Name</th><th>KM</th>
+          <th>Age Bucket</th><th>Days</th>
+          <th>Total RO Amount</th><th>Total Parts Amount</th><th>Total Labor Amount</th>
+        </tr></thead>
+        <tbody id="tbody"><tr><td colspan="16" class="muted">Loading...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
 </div>
 
 <script>
 const API = window.location.origin;
 
-function inr(x){
-    const n = Number(x || 0);
-    if (isNaN(n)) return "₹0.00";
-    return "₹" + n.toLocaleString("en-IN", {minimumFractionDigits:2, maximumFractionDigits:2});
-}
-function badgeClass(status){
-    const s = String(status || "").toLowerCase();
-    if (s.includes("approved") || s.includes("ready")) return "badge badge-green";
-    if (s.includes("hold") || s.includes("await") || s.includes("progress")) return "badge badge-amber";
-    return "badge badge-green";
-}
+/* ──────────────────────────────────────────────
+   MULTI-SELECT WIDGET
+   Panel uses position:fixed so it can never be
+   clipped by overflow:hidden parents.
+   Only one panel open at a time via closeAll().
+   ────────────────────────────────────────────── */
+const _allWidgets = [];   // registry for closeAll
 
-function getParams(){
-    const p = new URLSearchParams();
-    const branch = document.getElementById("branch").value;
-    const status = document.getElementById("status").value;
-    const age_bucket = document.getElementById("age_bucket").value;
-    const sr_type = document.getElementById("sr_type").value;
-    const hold_reason = document.getElementById("hold_reason").value;
-    const model_name = document.getElementById("model_name").value;
-    const from_date = document.getElementById("from_date").value;
-    const to_date = document.getElementById("to_date").value;
-    const reg_search = document.getElementById("reg_search").value;
+function MultiSelect(wrapperId, placeholder) {
+  const wrap    = document.getElementById(wrapperId);
+  const trigger = document.createElement("button");
+  trigger.type  = "button";
+  trigger.className = "ms-trigger";
+  trigger.textContent = placeholder;
 
-    if (branch && branch !== "All") p.append("branch", branch);
-    if (status && status !== "All") p.append("status", status);
-    if (age_bucket && age_bucket !== "All") p.append("age_bucket", age_bucket);
-    if (sr_type && sr_type !== "All") p.append("sr_type", sr_type);
-    if (hold_reason && hold_reason !== "All") p.append("hold_reason", hold_reason);
-    if (model_name && model_name !== "All") p.append("model_name", model_name);
-    if (from_date) p.append("from_date", from_date);
-    if (to_date) p.append("to_date", to_date);
-    if (reg_search && reg_search.trim() !== "") p.append("reg_search", reg_search.trim());
+  const panel   = document.createElement("div");
+  panel.className = "ms-panel";
+  panel.innerHTML = `
+    <input class="ms-search" type="text" placeholder="Search…"/>
+    <div class="ms-actions">
+      <button type="button" data-a="all">Select All</button>
+      <button type="button" data-a="none">Clear</button>
+    </div>
+    <div class="ms-list"></div>`;
 
-    return p;
-}
+  // Append panel to <body> so it's never inside a clipping container
+  document.body.appendChild(panel);
+  wrap.appendChild(trigger);
 
-async function loadFilterOptions(){
-    const res = await fetch(`${API}/api/filter-options`);
-    const data = await res.json();
+  const search  = panel.querySelector(".ms-search");
+  const list    = panel.querySelector(".ms-list");
+  let options   = [];      // strings, may include "All"
+  let selected  = new Set();
+  let onChange  = null;
 
-    const setOptions = (id, arr) => {
-        const el = document.getElementById(id);
-        el.innerHTML = "";
-        (arr || ["All"]).forEach(v => {
-            const op = document.createElement("option");
-            op.value = v;
-            op.textContent = v;
-            el.appendChild(op);
-        });
-    };
-
-    setOptions("branch", data.branches);
-    setOptions("status", data.statuses);
-    setOptions("age_bucket", data.age_buckets);
-    setOptions("sr_type", data.sr_types);
-    setOptions("hold_reason", data.hold_reasons);
-    setOptions("model_name", data.model_names);
-}
-
-async function loadStats(){
-    const p = getParams();
-    const res = await fetch(`${API}/api/stats?${p.toString()}`);
-    const s = await res.json();
-
-    document.getElementById("kpi_total_ros").textContent = s.total_ros || 0;
-    document.getElementById("kpi_ro_amt").textContent = inr(s.total_ro_amount || 0);
-    document.getElementById("kpi_parts_amt").textContent = inr(s.total_parts_amount || 0);
-    document.getElementById("kpi_labor_amt").textContent = inr(s.total_labor_amount || 0);
-}
-
-async function loadRows(){
-    const limit = document.getElementById("limit").value;
-    const p = getParams();
-    p.append("skip", "0");
-    p.append("limit", String(limit));
-
-    const res = await fetch(`${API}/api/rows?${p.toString()}`);
-    const data = await res.json();
-
-    const rows = data.rows || [];
-    document.getElementById("tableInfo").textContent =
-        `Showing ${rows.length} of ${data.filtered_count} vehicles (Total: ${data.total_count})`;
-
-    const tb = document.getElementById("tbody");
-    tb.innerHTML = "";
-
-    if (rows.length === 0){
-        tb.innerHTML = `<tr><td colspan="16" class="muted">No data found</td></tr>`;
-        return;
+  /* position panel fixed under trigger */
+  function reposition() {
+    const r  = trigger.getBoundingClientRect();
+    const vh = window.innerHeight;
+    const panelH = 280;
+    if (vh - r.bottom >= panelH || vh - r.bottom >= 120) {
+      panel.style.top    = (r.bottom + 4) + "px";
+      panel.style.bottom = "auto";
+    } else {
+      panel.style.bottom = (vh - r.top + 4) + "px";
+      panel.style.top    = "auto";
     }
+    panel.style.left  = r.left + "px";
+    panel.style.width = Math.max(r.width, 200) + "px";
+  }
 
-    rows.forEach(r => {
-        tb.innerHTML += `
-        <tr>
-            <td class="ro-id">${r.ro_id || "-"}</td>
-            <td>${r.ro_date || "-"}</td>
-            <td>${r.branch || "-"}</td>
-            <td><span class="${badgeClass(r.status)}">${r.status || "-"}</span></td>
-            <td>${r.sr_type || "-"}</td>
-            <td>${r.hold_reason || "-"}</td>
-            <td>${r.sa_name || "-"}</td>
-            <td class="reg">${r.reg_number || "-"}</td>
-            <td>${r.customer_name || "-"}</td>
-            <td>${r.model_name || "-"}</td>
-            <td>${(r.km || 0).toLocaleString("en-IN")}</td>
-            <td>${r.age_bucket || "-"}</td>
-            <td>${r.days || 0}</td>
-            <td class="money">${inr(r.total_ro_amount || 0)}</td>
-            <td class="money">${inr(r.total_parts_amount || 0)}</td>
-            <td class="money">${inr(r.total_labor_amount || 0)}</td>
-        </tr>`;
-    });
-}
-
-async function refreshAll(){
-    await loadStats();
-    await loadRows();
-}
-
-function clearAll(){
-    document.getElementById("branch").value = "All";
-    document.getElementById("status").value = "All";
-    document.getElementById("age_bucket").value = "All";
-    document.getElementById("sr_type").value = "All";
-    document.getElementById("hold_reason").value = "All";
-    document.getElementById("model_name").value = "All";
-    document.getElementById("from_date").value = "";
-    document.getElementById("to_date").value = "";
-    document.getElementById("reg_search").value = "";
-    document.getElementById("limit").value = "50";
-    refreshAll();
-}
-
-function toggleTheme(){
-    document.body.classList.toggle("dark");
-    const btn = document.getElementById("themeBtn");
-    const isDark = document.body.classList.contains("dark");
-    localStorage.setItem("uv_openro_theme", isDark ? "dark" : "light");
-    btn.textContent = isDark ? "☀️" : "🌙";
-}
-function initTheme(){
-    const v = localStorage.getItem("uv_openro_theme");
-    if (v === "dark"){
-        document.body.classList.add("dark");
-        document.getElementById("themeBtn").textContent = "☀️";
+  function updateTrigger() {
+    if (selected.size === 0) {
+      trigger.textContent = placeholder;
+    } else if (selected.size === 1) {
+      trigger.textContent = [...selected][0];
+    } else {
+      trigger.textContent = selected.size + " selected";
     }
+    trigger.classList.toggle("active", selected.size > 0);
+  }
+
+  function render() {
+    const q = search.value.trim().toLowerCase();
+    list.innerHTML = "";
+
+    // "All" row
+    const allRow = document.createElement("div");
+    allRow.className = "ms-item all-row";
+    allRow.innerHTML = `<input type="checkbox" ${selected.size===0?"checked":""}/><span class="ms-txt">${placeholder}</span>`;
+    allRow.addEventListener("mousedown", e => { e.preventDefault(); selected.clear(); render(); fire(); });
+    list.appendChild(allRow);
+
+    // Option rows
+    options.filter(o => o !== "All").forEach(opt => {
+      if (q && !opt.toLowerCase().includes(q)) return;
+      const row = document.createElement("div");
+      row.className = "ms-item";
+      const chk = document.createElement("input");
+      chk.type = "checkbox";
+      chk.checked = selected.has(opt);
+      const lbl = document.createElement("span");
+      lbl.className = "ms-txt";
+      lbl.textContent = opt;
+      row.appendChild(chk); row.appendChild(lbl);
+      row.addEventListener("mousedown", e => {
+        e.preventDefault();
+        selected.has(opt) ? selected.delete(opt) : selected.add(opt);
+        render(); fire();
+      });
+      list.appendChild(row);
+    });
+    updateTrigger();
+  }
+
+  function fire() { if (onChange) onChange([...selected]); }
+
+  function open() {
+    closeAll();               // close every other panel first
+    reposition();
+    panel.classList.add("open");
+    trigger.classList.add("active");
+    search.value = ""; render(); search.focus();
+  }
+  function close() {
+    panel.classList.remove("open");
+    if (selected.size === 0) trigger.classList.remove("active");
+  }
+
+  // register in global registry
+  _allWidgets.push({ close });
+
+  trigger.addEventListener("click", e => {
+    e.stopPropagation();
+    panel.classList.contains("open") ? close() : open();
+  });
+
+  search.addEventListener("input", render);
+  search.addEventListener("click", e => e.stopPropagation());
+
+  panel.addEventListener("click", e => e.stopPropagation());
+
+  panel.querySelectorAll(".ms-actions button").forEach(btn => {
+    btn.addEventListener("mousedown", e => {
+      e.preventDefault();
+      if (btn.dataset.a === "all") {
+        selected = new Set(options.filter(o => o !== "All"));
+      } else {
+        selected.clear();
+      }
+      render(); fire();
+    });
+  });
+
+  // reposition on scroll/resize
+  window.addEventListener("scroll", () => { if (panel.classList.contains("open")) reposition(); }, true);
+  window.addEventListener("resize", () => { if (panel.classList.contains("open")) reposition(); });
+
+  // public API
+  this.setOptions = arr => {
+    options = arr || [];
+    selected = new Set([...selected].filter(v => options.includes(v)));
+    render();
+  };
+  this.getValues  = () => [...selected];
+  this.clear      = () => { selected.clear(); render(); };
+  this.onChange   = fn => { onChange = fn; };
 }
 
-function hookEvents(){
-    ["branch","status","age_bucket","sr_type","hold_reason","model_name","from_date","to_date","limit"].forEach(id => {
-        document.getElementById(id).addEventListener("change", refreshAll);
-    });
-    document.getElementById("reg_search").addEventListener("keyup", () => {
-        window.clearTimeout(window.__t);
-        window.__t = window.setTimeout(refreshAll, 250);
-    });
-    document.getElementById("clearBtn").addEventListener("click", clearAll);
-    document.getElementById("themeBtn").addEventListener("click", toggleTheme);
+function closeAll() {
+  _allWidgets.forEach(w => w.close());
+}
+document.addEventListener("click", closeAll);
 
-    document.getElementById("exportBtn").addEventListener("click", async () => {
-        const p = getParams();
-        const url = `${API}/api/export?${p.toString()}`;
-        window.location.href = url;
-    });
+/* ── Helpers ── */
+function inr(x) {
+  const n = Number(x||0);
+  if (isNaN(n)) return "₹0.00";
+  return "₹" + n.toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+function badgeClass(s) {
+  s = (s||"").toLowerCase();
+  if (s.includes("approved")||s.includes("ready")) return "badge badge-green";
+  if (s.includes("hold")||s.includes("await")||s.includes("progress")) return "badge badge-amber";
+  return "badge badge-green";
 }
 
-(async function main(){
-    initTheme();
-    await loadFilterOptions();
-    hookEvents();
-    await refreshAll();
+/* ── Widgets ── */
+const MS = {
+  branch:      new MultiSelect("ms_branch",      "All Branches"),
+  status:      new MultiSelect("ms_status",      "All Statuses"),
+  age_bucket:  new MultiSelect("ms_age_bucket",  "All Age Buckets"),
+  sr_type:     new MultiSelect("ms_sr_type",     "All SR Types"),
+  hold_reason: new MultiSelect("ms_hold_reason", "All Hold Reasons"),
+  model_name:  new MultiSelect("ms_model_name",  "All Models"),
+};
+
+/* ── Params ── */
+function getParams() {
+  const p = new URLSearchParams();
+  const add = (key, w) => { const v = w.getValues(); if (v.length) p.append(key, v.join(",")); };
+  add("branch",      MS.branch);
+  add("status",      MS.status);
+  add("age_bucket",  MS.age_bucket);
+  add("sr_type",     MS.sr_type);
+  add("hold_reason", MS.hold_reason);
+  add("model_name",  MS.model_name);
+  const fd = document.getElementById("from_date").value;
+  const td = document.getElementById("to_date").value;
+  const rs = document.getElementById("reg_search").value.trim();
+  if (fd) p.append("from_date", fd);
+  if (td) p.append("to_date", td);
+  if (rs) p.append("reg_search", rs);
+  return p;
+}
+
+/* ── Load filter options ── */
+async function loadFilterOptions() {
+  const res  = await fetch(`${API}/api/filter-options`);
+  const data = await res.json();
+  MS.branch.setOptions(data.branches      || ["All"]);
+  MS.status.setOptions(data.statuses      || ["All"]);
+  MS.age_bucket.setOptions(data.age_buckets  || ["All"]);
+  MS.sr_type.setOptions(data.sr_types      || ["All"]);
+  MS.hold_reason.setOptions(data.hold_reasons || ["All"]);
+  MS.model_name.setOptions(data.model_names  || ["All"]);
+}
+
+/* ── Stats + Rows ── */
+async function loadStats() {
+  const res = await fetch(`${API}/api/stats?${getParams()}`);
+  const s   = await res.json();
+  document.getElementById("kpi_total_ros").textContent = s.total_ros || 0;
+  document.getElementById("kpi_ro_amt").textContent    = inr(s.total_ro_amount   || 0);
+  document.getElementById("kpi_parts_amt").textContent = inr(s.total_parts_amount|| 0);
+  document.getElementById("kpi_labor_amt").textContent = inr(s.total_labor_amount || 0);
+}
+
+async function loadRows() {
+  const limit = document.getElementById("limit").value;
+  const p     = getParams();
+  p.append("skip","0"); p.append("limit", limit);
+  const res  = await fetch(`${API}/api/rows?${p}`);
+  const data = await res.json();
+  const rows = data.rows || [];
+  document.getElementById("tableInfo").textContent =
+    `Showing ${rows.length} of ${data.filtered_count} vehicles (Total: ${data.total_count})`;
+  const tb = document.getElementById("tbody");
+  tb.innerHTML = "";
+  if (!rows.length) { tb.innerHTML=`<tr><td colspan="16" class="muted">No data found</td></tr>`; return; }
+  rows.forEach(r => {
+    tb.innerHTML += `<tr>
+      <td class="ro-id">${r.ro_id||"-"}</td>
+      <td>${r.ro_date||"-"}</td>
+      <td>${r.branch||"-"}</td>
+      <td><span class="${badgeClass(r.status)}">${r.status||"-"}</span></td>
+      <td>${r.sr_type||"-"}</td>
+      <td>${r.hold_reason||"-"}</td>
+      <td>${r.sa_name||"-"}</td>
+      <td class="reg">${r.reg_number||"-"}</td>
+      <td>${r.customer_name||"-"}</td>
+      <td>${r.model_name||"-"}</td>
+      <td>${(r.km||0).toLocaleString("en-IN")}</td>
+      <td>${r.age_bucket||"-"}</td>
+      <td>${r.days||0}</td>
+      <td class="money">${inr(r.total_ro_amount||0)}</td>
+      <td class="money">${inr(r.total_parts_amount||0)}</td>
+      <td class="money">${inr(r.total_labor_amount||0)}</td>
+    </tr>`;
+  });
+}
+
+async function refreshAll() { await loadStats(); await loadRows(); }
+
+function clearAll() {
+  Object.values(MS).forEach(w => w.clear());
+  document.getElementById("from_date").value  = "";
+  document.getElementById("to_date").value    = "";
+  document.getElementById("reg_search").value = "";
+  document.getElementById("limit").value      = "50";
+  refreshAll();
+}
+
+function toggleTheme() {
+  document.body.classList.toggle("dark");
+  const dark = document.body.classList.contains("dark");
+  localStorage.setItem("uv_openro_theme", dark?"dark":"light");
+  document.getElementById("themeBtn").textContent = dark?"☀️":"🌙";
+}
+function initTheme() {
+  if (localStorage.getItem("uv_openro_theme")==="dark") {
+    document.body.classList.add("dark");
+    document.getElementById("themeBtn").textContent = "☀️";
+  }
+}
+
+(async function main() {
+  initTheme();
+  await loadFilterOptions();
+  Object.values(MS).forEach(w => w.onChange(() => refreshAll()));
+  document.getElementById("from_date").addEventListener("change", refreshAll);
+  document.getElementById("to_date").addEventListener("change",   refreshAll);
+  document.getElementById("limit").addEventListener("change",     refreshAll);
+  document.getElementById("reg_search").addEventListener("keyup", () => {
+    clearTimeout(window.__rt); window.__rt = setTimeout(refreshAll, 250);
+  });
+  document.getElementById("clearBtn").addEventListener("click",  clearAll);
+  document.getElementById("themeBtn").addEventListener("click",  toggleTheme);
+  document.getElementById("exportBtn").addEventListener("click", () => {
+    window.location.href = `${API}/api/export?${getParams()}`;
+  });
+  await refreshAll();
 })();
 </script>
 </body>
