@@ -31,19 +31,45 @@ CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "120"))
 # HELPERS
 # =========================================================
 def parse_date_any(v):
-    if v is None or (isinstance(v, float) and pd.isna(v)) or pd.isna(v):
+    if v is None:
         return pd.NaT
+    # Already a timestamp/datetime
     if isinstance(v, (pd.Timestamp, datetime)):
         return pd.to_datetime(v, errors="coerce")
+    # Handle float NaN (from Excel)
+    try:
+        if isinstance(v, float) and pd.isna(v):
+            return pd.NaT
+    except Exception:
+        pass
     s = str(v).strip()
-    if s in ["", "-", "nan", "NaT", "None"]:
+    if s in ["", "-", "nan", "NaT", "None", "NaN"]:
         return pd.NaT
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%d-%b-%Y", "%d %b %Y"):
+    # Try all common formats — including Google Sheets CSV exports (M/D/YYYY)
+    for fmt in (
+        "%Y-%m-%d",       # 2026-03-15   (ISO)
+        "%d/%m/%Y",       # 15/03/2026   (Indian / UK)
+        "%m/%d/%Y",       # 3/15/2026    (Google Sheets US default)
+        "%d-%m-%Y",       # 15-03-2026
+        "%m/%d/%y",       # 3/15/26      (Google Sheets short year)
+        "%d/%m/%y",       # 15/03/26
+        "%d-%m-%y",       # 15-03-26
+        "%d-%b-%Y",       # 15-Mar-2026
+        "%d %b %Y",       # 15 Mar 2026
+        "%b %d, %Y",      # Mar 15, 2026
+        "%Y/%m/%d",       # 2026/03/15
+        "%d-%b-%y",       # 15-Mar-26
+    ):
         try:
             return pd.to_datetime(s, format=fmt, errors="raise")
         except Exception:
             pass
-    return pd.to_datetime(s, errors="coerce", dayfirst=True)
+    # Last resort: let pandas guess (dayfirst=False to match Google Sheets US format)
+    result = pd.to_datetime(s, errors="coerce", dayfirst=False)
+    if pd.isna(result):
+        # One more try with dayfirst=True
+        result = pd.to_datetime(s, errors="coerce", dayfirst=True)
+    return result
 
 
 def parse_iso_yyyy_mm_dd(s):
@@ -238,6 +264,15 @@ def load_data(force=False):
         MODEL_COL = "Model Name"
 
     df["RO_DATE_DT"] = df["RO Open Date"].apply(parse_date_any)
+
+    # DEBUG: log sample raw values and parsed results to diagnose date format
+    sample_raw    = df["RO Open Date"].dropna().head(5).tolist()
+    sample_parsed = df["RO_DATE_DT"].dropna().head(5).tolist()
+    nat_count     = int(df["RO_DATE_DT"].isna().sum())
+    print(f"[DATE DEBUG] Sample raw   : {sample_raw}")
+    print(f"[DATE DEBUG] Sample parsed: {sample_parsed}")
+    print(f"[DATE DEBUG] NaT count    : {nat_count} / {len(df)}")
+
     today = pd.Timestamp(date.today())
     df["DAYS_OPEN"] = (today - df["RO_DATE_DT"]).dt.days
     df["DAYS_OPEN"] = df["DAYS_OPEN"].fillna(0).astype(int)
