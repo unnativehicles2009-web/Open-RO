@@ -1,76 +1,51 @@
 import os
 import re
 import io
-import threading
-import webbrowser
 from datetime import datetime, date
+from typing import Optional
 
 import pandas as pd
+import requests
 from flask import Flask, jsonify, request, send_file, Response
 
 # =========================================================
-# CONFIG (edit here)
+# CONFIG
 # =========================================================
-# Local only (ignored on Render)
-HOST = os.environ.get("HOST", "127.0.0.1")
+APP_TITLE = os.environ.get("APP_TITLE", "Unnati Vehicles Open RO Dashboard")
+
+# Render provides PORT automatically
 PORT = int(os.environ.get("PORT", "5000"))
-AUTO_OPEN_BROWSER = os.environ.get("AUTO_OPEN_BROWSER", "true").lower() == "true"
 
-# Data source:
-# - For Render (Google Sheet): set GOOGLE_SHEET_CSV_URL env var to the published CSV URL
-# - For local Excel: set OPEN_RO_XLSX and OPEN_RO_SHEET env vars (or keep defaults below)
-GOOGLE_SHEET_CSV_URL = os.environ.get("GOOGLE_SHEET_CSV_URL", "").strip()
+# Google Sheet Published CSV (recommended)
+GOOGLE_SHEET_CSV_URL = os.environ.get(
+    "GOOGLE_SHEET_CSV_URL",
+    "https://docs.google.com/spreadsheets/d/e/2PACX-1vS5ZtziwobOOI3q4nOCyd0bJoQk0IW7GtSeszy23yLveqRZHBZJajVw7BTFngJnREqS8xaIH93RzGOe/pub?gid=0&single=true&output=csv",
+)
 
-EXCEL_PATH = os.environ.get("OPEN_RO_XLSX", r"E:\Renault\Open RO.xlsx")
+# Optional fallback to Excel (local only; not useful on Render unless you upload file to repo)
+EXCEL_PATH = os.environ.get("OPEN_RO_XLSX", "")
 SHEET_NAME = os.environ.get("OPEN_RO_SHEET", "Details")
 
-# Cache TTL for Google Sheet reload (seconds)
+# Cache refresh (seconds)
 CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "120"))
 
 # =========================================================
 # HELPERS
 # =========================================================
 def parse_date_any(v):
-    if v is None:
+    if v is None or (isinstance(v, float) and pd.isna(v)) or pd.isna(v):
         return pd.NaT
-    # Already a timestamp/datetime
     if isinstance(v, (pd.Timestamp, datetime)):
         return pd.to_datetime(v, errors="coerce")
-    # Handle float NaN (from Excel)
-    try:
-        if isinstance(v, float) and pd.isna(v):
-            return pd.NaT
-    except Exception:
-        pass
     s = str(v).strip()
-    if s in ["", "-", "nan", "NaT", "None", "NaN"]:
+    if s in ["", "-", "nan", "NaT", "None"]:
         return pd.NaT
-    # Try all common formats — including Google Sheets CSV exports (M/D/YYYY)
-    for fmt in (
-        "%Y-%m-%d",       # 2026-03-15   (ISO)
-        "%d/%m/%Y",       # 15/03/2026   (Indian / UK)
-        "%m/%d/%Y",       # 3/15/2026    (Google Sheets US default)
-        "%d-%m-%Y",       # 15-03-2026
-        "%m/%d/%y",       # 3/15/26      (Google Sheets short year)
-        "%d/%m/%y",       # 15/03/26
-        "%d-%m-%y",       # 15-03-26
-        "%d-%b-%Y",       # 15-Mar-2026
-        "%d %b %Y",       # 15 Mar 2026
-        "%b %d, %Y",      # Mar 15, 2026
-        "%Y/%m/%d",       # 2026/03/15
-        "%d-%b-%y",       # 15-Mar-26
-    ):
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%d-%b-%Y", "%d %b %Y"):
         try:
             return pd.to_datetime(s, format=fmt, errors="raise")
         except Exception:
             pass
-    # Last resort: let pandas guess (dayfirst=False to match Google Sheets US format)
-    result = pd.to_datetime(s, errors="coerce", dayfirst=False)
-    if pd.isna(result):
-        # One more try with dayfirst=True
-        result = pd.to_datetime(s, errors="coerce", dayfirst=True)
-    return result
-
+    return pd.to_datetime(s, errors="coerce", dayfirst=True)
 
 def parse_iso_yyyy_mm_dd(s):
     s = (s or "").strip()
@@ -82,25 +57,28 @@ def parse_iso_yyyy_mm_dd(s):
         dt = pd.to_datetime(s, errors="coerce", dayfirst=True)
         return None if pd.isna(dt) else dt
 
-
-def clean_money_to_float(x):
+def clean_money_to_float(x) -> float:
     if x is None or (isinstance(x, float) and pd.isna(x)) or pd.isna(x):
         return 0.0
     s = str(x).strip()
     if s in ["", "-", "nan", "NaT", "None"]:
         return 0.0
-    s = re.sub(r"(?i)rs\.?", "", s)
+
+    # Remove currency text like "Rs", "Rs.", "INR", and ₹
+    s = re.sub(r"(?i)\b(rs\.?|inr)\b", "", s)
     s = s.replace("₹", "")
     s = s.replace(",", "").strip()
+
+    # Sometimes value comes like "0.00 " or " 1234"
     try:
         return float(s)
     except Exception:
-        s2 = re.sub(r"[^0-9.]+", "", s)
+        # If it contains any other chars, keep digits+dot+minus only
+        s2 = re.sub(r"[^0-9\.\-]", "", s)
         try:
             return float(s2) if s2 else 0.0
         except Exception:
             return 0.0
-
 
 def age_bucket_from_days(days: int) -> str:
     if days <= 3:
@@ -115,13 +93,11 @@ def age_bucket_from_days(days: int) -> str:
         return "31-60 days"
     return "Above 60"
 
-
 def safe_str(v, default="-"):
     if v is None or (isinstance(v, float) and pd.isna(v)) or pd.isna(v):
         return default
     s = str(v).strip()
     return default if s == "" else s
-
 
 def fmt_ddmmyyyy(ts):
     if ts is None or (isinstance(ts, float) and pd.isna(ts)) or pd.isna(ts):
@@ -134,7 +110,6 @@ def fmt_ddmmyyyy(ts):
     except Exception:
         return "-"
 
-
 def to_int_safe(v, default=0):
     try:
         if v is None or (isinstance(v, float) and pd.isna(v)) or pd.isna(v):
@@ -142,7 +117,6 @@ def to_int_safe(v, default=0):
         return int(float(v))
     except Exception:
         return default
-
 
 def pick_first_existing_column(df: pd.DataFrame, candidates):
     if df is None or df.empty:
@@ -155,7 +129,6 @@ def pick_first_existing_column(df: pd.DataFrame, candidates):
             return lower_map[key]
     return None
 
-
 def proper_case_name(s: str) -> str:
     s = (s or "").strip()
     if not s:
@@ -164,35 +137,17 @@ def proper_case_name(s: str) -> str:
     parts = [p[:1].upper() + p[1:].lower() if p else "" for p in parts]
     return " ".join([p for p in parts if p])
 
-
-def normalize_multi_values(values):
-    out = []
-    for v in values or []:
-        if v is None:
-            continue
-        s = str(v).strip()
-        if not s:
-            continue
-        parts = [p.strip() for p in s.split(",")]
-        for p in parts:
-            if p:
-                out.append(p)
-    seen = set()
-    uniq = []
-    for x in out:
-        if x not in seen:
-            seen.add(x)
-            uniq.append(x)
-    return uniq
-
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    # Clean column names (trim)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
 
 # =========================================================
-# LOAD + PREPARE DATA
+# LOAD + PREPARE DATA (with caching)
 # =========================================================
 DF = pd.DataFrame()
 MODEL_COL = None
-LAST_LOAD_TS = None
-LAST_SOURCE = None
+_LAST_LOAD_TS: Optional[float] = None
 
 REQUIRED_COLS = [
     "Dealer Code",
@@ -223,124 +178,129 @@ MODEL_CANDIDATES = [
     "MODEL GROUP",
 ]
 
-
-def _read_source_df() -> pd.DataFrame:
-    if GOOGLE_SHEET_CSV_URL:
-        df = pd.read_csv(GOOGLE_SHEET_CSV_URL, dtype=str, keep_default_na=False)
-        return df
-    if not os.path.exists(EXCEL_PATH):
-        raise FileNotFoundError(f"Excel not found: {EXCEL_PATH}")
-    df = pd.read_excel(EXCEL_PATH, sheet_name=SHEET_NAME, dtype=object)
+def _load_from_google_csv(url: str) -> pd.DataFrame:
+    r = requests.get(url, timeout=30)
+    r.raise_for_status()
+    bio = io.BytesIO(r.content)
+    df = pd.read_csv(bio)
     return df
 
+def _load_from_excel(path: str, sheet: str) -> pd.DataFrame:
+    return pd.read_excel(path, sheet_name=sheet)
 
-def load_data(force=False):
-    global DF, MODEL_COL, LAST_LOAD_TS, LAST_SOURCE
+def load_data(force: bool = False):
+    global DF, MODEL_COL, _LAST_LOAD_TS
 
-    now = pd.Timestamp.utcnow()
-
-    if not force and GOOGLE_SHEET_CSV_URL and LAST_LOAD_TS is not None:
-        age = (now - LAST_LOAD_TS).total_seconds()
-        if age < CACHE_TTL_SECONDS and DF is not None and not DF.empty:
-            return
-
-    try:
-        df = _read_source_df()
-    except Exception as e:
-        DF = pd.DataFrame()
-        MODEL_COL = None
-        LAST_LOAD_TS = now
-        LAST_SOURCE = "error"
-        print(f"[ERROR] load failed: {e}")
+    now_ts = datetime.utcnow().timestamp()
+    if (not force) and _LAST_LOAD_TS and (now_ts - _LAST_LOAD_TS) < CACHE_TTL_SECONDS and (DF is not None) and (not DF.empty):
         return
 
+    df = None
+    last_error = None
+
+    # 1) Try Google Sheet CSV first
+    if GOOGLE_SHEET_CSV_URL:
+        try:
+            df = _load_from_google_csv(GOOGLE_SHEET_CSV_URL)
+        except Exception as e:
+            last_error = f"Google CSV load failed: {e}"
+
+    # 2) Fallback Excel (mostly for local use)
+    if df is None:
+        if EXCEL_PATH and os.path.exists(EXCEL_PATH):
+            try:
+                df = _load_from_excel(EXCEL_PATH, SHEET_NAME)
+            except Exception as e:
+                last_error = f"Excel load failed: {e}"
+        else:
+            last_error = last_error or "No data source available"
+
+    if df is None:
+        DF = pd.DataFrame()
+        MODEL_COL = None
+        _LAST_LOAD_TS = now_ts
+        print(f"[ERROR] load_data: {last_error}")
+        return
+
+    df = normalize_columns(df)
+
+    # Ensure required columns exist
     for c in REQUIRED_COLS:
         if c not in df.columns:
             df[c] = None
 
+    # Detect model column
     MODEL_COL = pick_first_existing_column(df, MODEL_CANDIDATES)
     if MODEL_COL is None:
         df["Model Name"] = None
         MODEL_COL = "Model Name"
 
+    # Dates
     df["RO_DATE_DT"] = df["RO Open Date"].apply(parse_date_any)
-
-    # DEBUG: log sample raw values and parsed results to diagnose date format
-    sample_raw    = df["RO Open Date"].dropna().head(5).tolist()
-    sample_parsed = df["RO_DATE_DT"].dropna().head(5).tolist()
-    nat_count     = int(df["RO_DATE_DT"].isna().sum())
-    print(f"[DATE DEBUG] Sample raw   : {sample_raw}")
-    print(f"[DATE DEBUG] Sample parsed: {sample_parsed}")
-    print(f"[DATE DEBUG] NaT count    : {nat_count} / {len(df)}")
-
     today = pd.Timestamp(date.today())
     df["DAYS_OPEN"] = (today - df["RO_DATE_DT"]).dt.days
     df["DAYS_OPEN"] = df["DAYS_OPEN"].fillna(0).astype(int)
     df.loc[df["DAYS_OPEN"] < 0, "DAYS_OPEN"] = 0
     df["AGE_BUCKET"] = df["DAYS_OPEN"].apply(age_bucket_from_days)
 
+    # Hold reason: blank => "No reason"
     df["HOLD_REASON_CLEAN"] = df["Hold Reason"].apply(lambda x: safe_str(x, "")).astype(str).str.strip()
     df.loc[df["HOLD_REASON_CLEAN"] == "", "HOLD_REASON_CLEAN"] = "No reason"
 
+    # Model name clean
     df["MODEL_NAME_CLEAN"] = df[MODEL_COL].apply(lambda x: safe_str(x, "")).astype(str).str.strip()
     df.loc[df["MODEL_NAME_CLEAN"] == "", "MODEL_NAME_CLEAN"] = "Unknown"
 
+    # Customer name = First + Last (Proper Case)
     fn = df["Owner Contact First Name"].apply(lambda x: safe_str(x, "")).astype(str)
     ln = df["Owner Contact Last Name"].apply(lambda x: safe_str(x, "")).astype(str)
     df["CUSTOMER_NAME"] = (fn.str.strip() + " " + ln.str.strip()).str.strip()
     df["CUSTOMER_NAME"] = df["CUSTOMER_NAME"].apply(proper_case_name)
     df.loc[df["CUSTOMER_NAME"] == "", "CUSTOMER_NAME"] = "Unknown"
 
+    # Money columns (important: your sheet has "Rs" text)
     df["RO_AMOUNT_NUM"] = df["Total RO Amount"].apply(clean_money_to_float)
     df["PARTS_AMOUNT_NUM"] = df["Total Parts Amount"].apply(clean_money_to_float)
     df["LABOR_AMOUNT_NUM"] = df["Total Labor Amount"].apply(clean_money_to_float)
 
+    # Sort by latest RO date
     df = df.sort_values("RO_DATE_DT", ascending=False, na_position="last").reset_index(drop=True)
 
     DF = df
-    LAST_LOAD_TS = now
-    LAST_SOURCE = "google_csv" if GOOGLE_SHEET_CSV_URL else "excel"
-    print(f"[OK] Loaded rows: {len(DF)} | model_col: {MODEL_COL} | source: {LAST_SOURCE}")
+    _LAST_LOAD_TS = now_ts
+    print(f"[OK] Loaded rows: {len(DF)} | model_col: {MODEL_COL} | source: {'google_csv' if GOOGLE_SHEET_CSV_URL else 'excel'}")
 
-
+# initial load
 load_data(force=True)
 
 # =========================================================
 # FILTERING
 # =========================================================
-def _get_multi_param(name: str):
-    raw = request.args.getlist(name)
-    vals = normalize_multi_values(raw)
-    vals = [v for v in vals if v and v != "All"]
-    return vals
-
-
-def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
+def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
     out = df.copy()
 
-    branches = _get_multi_param("branch")
-    statuses = _get_multi_param("status")
-    age_buckets = _get_multi_param("age_bucket")
-    sr_types = _get_multi_param("sr_type")
-    hold_reasons = _get_multi_param("hold_reason")
-    model_names = _get_multi_param("model_name")
+    branch = args.get("branch", "All")
+    status = args.get("status", "All")
+    age_bucket = args.get("age_bucket", "All")
+    sr_type = args.get("sr_type", "All")
+    hold_reason = args.get("hold_reason", "All")
+    model_name = args.get("model_name", "All")
+    reg_search = (args.get("reg_search", "") or "").strip()
+    from_date = (args.get("from_date", "") or "").strip()
+    to_date = (args.get("to_date", "") or "").strip()
 
-    reg_search = (request.args.get("reg_search", "") or "").strip()
-    from_date = (request.args.get("from_date", "") or "").strip()
-    to_date = (request.args.get("to_date", "") or "").strip()
-
-    if branches:
-        out = out[out["Dealer Code"].astype(str).isin([str(x) for x in branches])]
-    if statuses:
-        out = out[out["Status"].astype(str).isin([str(x) for x in statuses])]
-    if age_buckets:
-        out = out[out["AGE_BUCKET"].astype(str).isin([str(x) for x in age_buckets])]
-    if sr_types:
-        out = out[out["SR Type"].astype(str).isin([str(x) for x in sr_types])]
-    if hold_reasons:
-        out = out[out["HOLD_REASON_CLEAN"].astype(str).isin([str(x) for x in hold_reasons])]
-    if model_names:
-        out = out[out["MODEL_NAME_CLEAN"].astype(str).isin([str(x) for x in model_names])]
+    if branch and branch != "All":
+        out = out[out["Dealer Code"].astype(str) == str(branch)]
+    if status and status != "All":
+        out = out[out["Status"].astype(str) == str(status)]
+    if age_bucket and age_bucket != "All":
+        out = out[out["AGE_BUCKET"].astype(str) == str(age_bucket)]
+    if sr_type and sr_type != "All":
+        out = out[out["SR Type"].astype(str) == str(sr_type)]
+    if hold_reason and hold_reason != "All":
+        out = out[out["HOLD_REASON_CLEAN"].astype(str) == str(hold_reason)]
+    if model_name and model_name != "All":
+        out = out[out["MODEL_NAME_CLEAN"].astype(str) == str(model_name)]
 
     if reg_search:
         key = reg_search.upper()
@@ -358,7 +318,6 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
         out = out[out["RO_DATE_DT"] <= td_end]
 
     return out
-
 
 def json_row(r) -> dict:
     return {
@@ -380,7 +339,6 @@ def json_row(r) -> dict:
         "total_labor_amount": float(r.get("LABOR_AMOUNT_NUM", 0.0) or 0.0),
     }
 
-
 # =========================================================
 # FLASK APP
 # =========================================================
@@ -393,27 +351,19 @@ def add_cors_headers(resp):
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization"
     return resp
 
-
 @app.route("/health")
 def health():
-    load_data()
-    return jsonify({
-        "status": "ok",
-        "rows": int(len(DF)) if DF is not None else 0,
-        "source": LAST_SOURCE,
-        "last_load_utc": str(LAST_LOAD_TS) if LAST_LOAD_TS is not None else None,
-    })
-
+    load_data(force=False)
+    return jsonify({"status": "ok", "rows": int(len(DF)) if DF is not None else 0})
 
 @app.route("/api/reload")
 def api_reload():
     load_data(force=True)
-    return jsonify({"ok": True, "rows": int(len(DF)), "model_col": MODEL_COL, "source": LAST_SOURCE})
-
+    return jsonify({"ok": True, "rows": int(len(DF)), "model_col": MODEL_COL})
 
 @app.route("/api/filter-options")
 def filter_options():
-    load_data()
+    load_data(force=False)
     if DF is None or DF.empty:
         return jsonify({
             "branches": ["All"],
@@ -430,7 +380,6 @@ def filter_options():
     hold_reasons = ["All"] + sorted([safe_str(x) for x in DF["HOLD_REASON_CLEAN"].dropna().unique().tolist()])
     model_names = ["All"] + sorted([safe_str(x) for x in DF["MODEL_NAME_CLEAN"].dropna().unique().tolist()])
 
-    # Age buckets always in correct logical order
     age_order = ["0-3 days", "4-10 days", "11-15 days", "16-30 days", "31-60 days", "Above 60"]
     present = [x for x in age_order if x in set(DF["AGE_BUCKET"].astype(str).unique())]
     age_buckets = ["All"] + present
@@ -444,10 +393,9 @@ def filter_options():
         "model_names": model_names,
     })
 
-
 @app.route("/api/stats")
 def stats():
-    load_data()
+    load_data(force=False)
     if DF is None or DF.empty:
         return jsonify({
             "total_ros": 0,
@@ -456,7 +404,7 @@ def stats():
             "total_labor_amount": 0.0,
         })
 
-    filtered = apply_filters(DF)
+    filtered = apply_filters(DF, request.args)
     return jsonify({
         "total_ros": int(len(filtered)),
         "total_ro_amount": float(filtered["RO_AMOUNT_NUM"].sum()) if "RO_AMOUNT_NUM" in filtered.columns else 0.0,
@@ -464,17 +412,16 @@ def stats():
         "total_labor_amount": float(filtered["LABOR_AMOUNT_NUM"].sum()) if "LABOR_AMOUNT_NUM" in filtered.columns else 0.0,
     })
 
-
 @app.route("/api/rows")
 def rows():
-    load_data()
+    load_data(force=False)
     if DF is None or DF.empty:
         return jsonify({"total_count": 0, "filtered_count": 0, "rows": []})
 
     limit = int(request.args.get("limit", "50"))
     skip = int(request.args.get("skip", "0"))
 
-    filtered = apply_filters(DF)
+    filtered = apply_filters(DF, request.args)
     total_count = int(len(DF))
     filtered_count = int(len(filtered))
 
@@ -487,14 +434,13 @@ def rows():
         "rows": out,
     })
 
-
 @app.route("/api/export")
 def export_excel():
-    load_data()
+    load_data(force=False)
     if DF is None or DF.empty:
         return jsonify({"error": "No data"})
 
-    filtered = apply_filters(DF).copy()
+    filtered = apply_filters(DF, request.args).copy()
     if filtered.empty:
         return jsonify({"error": "No data for filters"})
 
@@ -520,9 +466,9 @@ def export_excel():
     })
 
     desired_order = [
-        "RO ID", "RO Date", "Branch", "Status", "SR Type", "Hold Reason",
-        "SA Name", "Reg Number", "Customer Name", "Model Name", "KM",
-        "Age Bucket", "Days", "Total RO Amount", "Total Parts Amount", "Total Labor Amount"
+        "RO ID","RO Date","Branch","Status","SR Type","Hold Reason",
+        "SA Name","Reg Number","Customer Name","Model Name","KM",
+        "Age Bucket","Days","Total RO Amount","Total Parts Amount","Total Labor Amount"
     ]
     existing = [c for c in desired_order if c in export_df.columns]
     remaining = [c for c in export_df.columns if c not in existing]
@@ -540,7 +486,6 @@ def export_excel():
         download_name=filename,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
 
 # =========================================================
 # FRONTEND (embedded HTML)
@@ -579,7 +524,7 @@ HTML = r"""
         border:none;
         border-radius:10px;
         padding:10px 14px;
-        font-weight:800;
+        font-weight:700;
         cursor:pointer;
         font-size:13px;
         transition: transform 0.15s ease;
@@ -590,7 +535,9 @@ HTML = r"""
     .btn-theme{
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         color:#fff;
-        padding:10px 14px;
+        width:46px; height:46px;
+        display:flex; align-items:center; justify-content:center;
+        font-size:18px;
         box-shadow:0 4px 15px rgba(102,126,234,0.30);
     }
 
@@ -607,7 +554,7 @@ HTML = r"""
         box-shadow:0 5px 15px rgba(0,0,0,0.10);
         text-align:center;
     }
-    .card .label{ font-size:11px; letter-spacing:0.6px; color:#666; font-weight:900; text-transform:uppercase; }
+    .card .label{ font-size:11px; letter-spacing:0.6px; color:#666; font-weight:800; text-transform:uppercase; }
     .card .value{ margin-top:10px; font-size:28px; color:#667eea; font-weight:900; }
     .card.grad{
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -616,28 +563,20 @@ HTML = r"""
     .card.grad .label{ color: rgba(255,255,255,0.85); }
     .card.grad .value{ color:#fff; font-size:24px; }
 
-    /* FIX: filters must NOT clip its children dropdowns */
     .filters{
         background:#fff;
         border-radius:12px;
         padding:14px;
         box-shadow:0 5px 15px rgba(0,0,0,0.10);
         margin-bottom: 14px;
-        /* overflow visible so dropdown panels are not clipped */
-        overflow: visible;
-        position: relative;
-        z-index: 10;
     }
     .filters-grid{
         display:grid;
         grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
         gap:12px;
-        /* overflow visible so dropdown panels can escape the grid */
-        overflow: visible;
     }
-    label{ display:block; font-size:12px; font-weight:900; color:#111; margin-bottom:6px; }
-
-    input{
+    label{ display:block; font-size:12px; font-weight:800; color:#111; margin-bottom:6px; }
+    select, input{
         width:100%;
         padding:10px;
         border-radius:10px;
@@ -662,7 +601,7 @@ HTML = r"""
         gap:10px;
         flex-wrap:wrap;
     }
-    .info{ font-size:12px; color:#444; font-weight:800; }
+    .info{ font-size:12px; color:#444; font-weight:700; }
     .btn-export{ background:#27ae60; color:#fff; }
     .btn-export:hover{ background:#229954; }
 
@@ -708,7 +647,6 @@ HTML = r"""
     .money{ font-weight:900; }
     .muted{ color:#666; }
 
-    /* Dark theme */
     body.dark{
         background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
         color:#e0e0e0;
@@ -723,7 +661,7 @@ HTML = r"""
     }
     body.dark h1{ color:#e0e0e0; }
     body.dark .table-header{ background:#3a4575; border-bottom-color:#4a5585; }
-    body.dark input{
+    body.dark select, body.dark input{
         background:#3a4575;
         color:#e0e0e0;
         border-color:#4a5585;
@@ -731,113 +669,6 @@ HTML = r"""
     body.dark thead th{ background:#2d3561; color:#e0e0e0; border-bottom-color:#3a4575; }
     body.dark tbody td{ border-bottom-color:#3a4575; color:#e0e0e0; }
     body.dark tbody tr:hover{ background:#3a4575; }
-
-    /* =============================================
-       Multi-select dropdown — FIXED
-       ============================================= */
-    .ms{
-        position: relative;
-        width: 100%;
-    }
-    .ms-btn{
-        width: 100%;
-        text-align: left;
-        padding: 10px;
-        border-radius: 10px;
-        border: 1px solid #ddd;
-        background: #fff;
-        font-size: 13px;
-        font-weight: 700;
-        cursor: pointer;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 10px;
-    }
-    .ms-btn span.ms-title{
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        flex: 1;
-    }
-    .ms-caret{
-        flex-shrink: 0;
-        font-size: 10px;
-        color: #888;
-        transition: transform 0.2s ease;
-    }
-    .ms.open .ms-caret{
-        transform: rotate(180deg);
-    }
-
-    /* Panel is fixed-positioned so it always escapes any clipping parent */
-    .ms-panel{
-        position: fixed;   /* KEY FIX: fixed instead of absolute */
-        background: #fff;
-        border: 1px solid #ddd;
-        border-radius: 12px;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.18);
-        padding: 10px;
-        z-index: 99999;    /* KEY FIX: very high z-index */
-        display: none;
-        max-height: 280px;
-        overflow: auto;
-        min-width: 220px;
-    }
-    .ms.open .ms-panel{ display: block; }
-
-    .ms-search{
-        width: 100%;
-        padding: 10px;
-        border-radius: 10px;
-        border: 1px solid #e0e0e0;
-        outline: none;
-        font-size: 13px;
-        margin-bottom: 8px;
-    }
-    .ms-actions{
-        display: flex;
-        gap: 8px;
-        margin-bottom: 8px;
-    }
-    .ms-actions button{
-        border: none;
-        border-radius: 10px;
-        padding: 8px 10px;
-        font-size: 12px;
-        font-weight: 800;
-        cursor: pointer;
-        background: #f3f3f3;
-    }
-    .ms-item{
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        padding: 6px 6px;
-        border-radius: 8px;
-        cursor: pointer;
-        user-select: none;
-    }
-    .ms-item:hover{ background: #f7f7f7; }
-    .ms-item input[type="checkbox"]{ width: auto; flex-shrink: 0; }
-    .ms-item .txt{ font-size: 13px; font-weight: 650; color: #111; }
-
-    /* Age bucket badge colours inside dropdown */
-    .ms-item .age-dot{
-        display: inline-block;
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        flex-shrink: 0;
-    }
-
-    /* Dark theme for ms */
-    body.dark .ms-btn{ background:#3a4575; border-color:#4a5585; color:#e0e0e0; }
-    body.dark .ms-panel{ background:#2d3561; border-color:#4a5585; }
-    body.dark .ms-search{ background:#3a4575; border-color:#4a5585; color:#e0e0e0; }
-    body.dark .ms-actions button{ background:#3a4575; color:#e0e0e0; }
-    body.dark .ms-item:hover{ background:#3a4575; }
-    body.dark .ms-item .txt{ color:#e0e0e0; }
 </style>
 </head>
 <body>
@@ -845,7 +676,7 @@ HTML = r"""
     <header>
         <h1>Unnati Vehicles Open RO Dashboard</h1>
         <div class="header-actions">
-            <button class="btn btn-theme" id="themeBtn" title="Toggle Theme">Theme</button>
+            <button class="btn btn-theme" id="themeBtn" title="Toggle Theme">🌙</button>
             <button class="btn btn-clear" id="clearBtn">Clear All</button>
         </div>
     </header>
@@ -873,29 +704,28 @@ HTML = r"""
         <div class="filters-grid">
             <div>
                 <label>Branch</label>
-                <div class="ms" id="ms_branch"></div>
+                <select id="branch"></select>
             </div>
             <div>
                 <label>RO Status</label>
-                <div class="ms" id="ms_status"></div>
+                <select id="status"></select>
             </div>
             <div>
                 <label>Age Bucket</label>
-                <div class="ms" id="ms_age_bucket"></div>
+                <select id="age_bucket"></select>
             </div>
             <div>
                 <label>SR Type</label>
-                <div class="ms" id="ms_sr_type"></div>
+                <select id="sr_type"></select>
             </div>
             <div>
                 <label>Hold Reason</label>
-                <div class="ms" id="ms_hold_reason"></div>
+                <select id="hold_reason"></select>
             </div>
             <div>
                 <label>Model Name</label>
-                <div class="ms" id="ms_model_name"></div>
+                <select id="model_name"></select>
             </div>
-
             <div>
                 <label>From Date</label>
                 <input type="date" id="from_date"/>
@@ -910,7 +740,7 @@ HTML = r"""
             </div>
             <div>
                 <label>Records</label>
-                <select id="limit" style="width:100%; padding:10px; border-radius:10px; border:1px solid #ddd; font-size:13px; outline:none;">
+                <select id="limit">
                     <option value="10">10 Records</option>
                     <option value="20">20 Records</option>
                     <option value="50" selected>50 Records</option>
@@ -939,7 +769,6 @@ HTML = r"""
                         <th>SA Name</th>
                         <th>Reg Number</th>
                         <th>Model Name</th>
-                        <th>Customer Name</th>
                         <th>KM</th>
                         <th>Age Bucket</th>
                         <th>Days</th>
@@ -949,7 +778,7 @@ HTML = r"""
                     </tr>
                 </thead>
                 <tbody id="tbody">
-                    <tr><td colspan="16" class="muted">Loading...</td></tr>
+                    <tr><td colspan="15" class="muted">Loading...</td></tr>
                 </tbody>
             </table>
         </div>
@@ -971,289 +800,102 @@ function badgeClass(status){
     return "badge badge-green";
 }
 
-/* ===========================
-   Multi-select widget — FIXED
-   Uses position:fixed for panel so it never gets clipped by
-   overflow:hidden parents or grid containers.
-   =========================== */
-function createMultiSelect(containerId, labelAllText){
-    const root = document.getElementById(containerId);
-    root.innerHTML = `
-      <button type="button" class="ms-btn">
-        <span class="ms-title">${labelAllText || "All"}</span>
-        <span class="ms-caret">▾</span>
-      </button>
-      <div class="ms-panel">
-        <input class="ms-search" type="text" placeholder="Search..."/>
-        <div class="ms-actions">
-          <button type="button" data-act="all">Select All</button>
-          <button type="button" data-act="none">Clear</button>
-        </div>
-        <div class="ms-list"></div>
-      </div>
-    `;
-
-    const btn   = root.querySelector(".ms-btn");
-    const panel = root.querySelector(".ms-panel");
-    const list  = root.querySelector(".ms-list");
-    const search= root.querySelector(".ms-search");
-    const title = root.querySelector(".ms-title");
-
-    const state = {
-        options: [],
-        selected: new Set(),
-        onChange: null
-    };
-
-    /* --- position the fixed panel under the trigger button --- */
-    function positionPanel(){
-        const rect = btn.getBoundingClientRect();
-        const viewH = window.innerHeight;
-        const panelH = 280; // max-height
-
-        // decide: open downward or upward?
-        const spaceBelow = viewH - rect.bottom;
-        if (spaceBelow >= panelH || spaceBelow >= 160){
-            panel.style.top  = (rect.bottom + 4) + "px";
-            panel.style.bottom = "auto";
-        } else {
-            // open upward
-            panel.style.bottom = (viewH - rect.top + 4) + "px";
-            panel.style.top    = "auto";
-        }
-        panel.style.left  = rect.left + "px";
-        panel.style.width = Math.max(rect.width, 220) + "px";
-    }
-
-    function updateTitle(){
-        if (state.selected.size === 0){
-            title.textContent = labelAllText || "All";
-        } else if (state.selected.size === 1){
-            title.textContent = Array.from(state.selected)[0];
-        } else {
-            title.textContent = state.selected.size + " Selected";
-        }
-    }
-
-    function render(){
-        const q = (search.value || "").trim().toLowerCase();
-        list.innerHTML = "";
-
-        // "All" row
-        const allChecked = state.selected.size === 0;
-        const allRow = document.createElement("div");
-        allRow.className = "ms-item";
-        allRow.innerHTML = `<input type="checkbox" ${allChecked ? "checked" : ""}/>
-                            <div class="txt">${labelAllText || "All"}</div>`;
-        allRow.addEventListener("click", (e) => {
-            e.preventDefault();
-            state.selected.clear();
-            render();
-            fireChange();
-        });
-        list.appendChild(allRow);
-
-        // Real option rows (skip "All" from backend list)
-        const opts = state.options.filter(x => x !== "All");
-        for (const v of opts){
-            if (q && String(v).toLowerCase().indexOf(q) === -1) continue;
-            const checked = state.selected.has(v);
-            const row = document.createElement("div");
-            row.className = "ms-item";
-            row.innerHTML = `<input type="checkbox" ${checked ? "checked" : ""}/>
-                             <div class="txt"></div>`;
-            row.querySelector(".txt").textContent = v;
-            row.addEventListener("click", (e) => {
-                e.preventDefault();
-                if (state.selected.has(v)) state.selected.delete(v);
-                else state.selected.add(v);
-                render();
-                fireChange();
-            });
-            list.appendChild(row);
-        }
-        updateTitle();
-    }
-
-    function fireChange(){
-        if (typeof state.onChange === "function") state.onChange(getSelectedValues());
-    }
-
-    function open(){
-        // Close any other open dropdowns first
-        document.querySelectorAll(".ms.open").forEach(el => {
-            if (el !== root) el.classList.remove("open");
-        });
-        root.classList.add("open");
-        positionPanel();
-        panel.style.display = "block";
-        search.value = "";
-        render();
-        search.focus();
-    }
-
-    function close(){
-        root.classList.remove("open");
-        panel.style.display = "none";
-    }
-
-    btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        if (root.classList.contains("open")) close();
-        else open();
-    });
-
-    // Reposition on scroll / resize so fixed panel stays aligned
-    window.addEventListener("scroll", () => {
-        if (root.classList.contains("open")) positionPanel();
-    }, true);
-    window.addEventListener("resize", () => {
-        if (root.classList.contains("open")) positionPanel();
-    });
-
-    root.querySelectorAll(".ms-actions button").forEach(b => {
-        b.addEventListener("click", (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            if (b.getAttribute("data-act") === "all"){
-                state.selected = new Set(state.options.filter(x => x !== "All"));
-            } else {
-                state.selected.clear();
-            }
-            render();
-            fireChange();
-        });
-    });
-
-    search.addEventListener("input", render);
-    search.addEventListener("click", (e) => e.stopPropagation());
-
-    // Click outside to close
-    document.addEventListener("click", (e) => {
-        if (!root.contains(e.target) && !panel.contains(e.target)){
-            if (root.classList.contains("open")) close();
-        }
-    });
-
-    /* --- public API --- */
-    function setOptions(arr){
-        state.options = (arr || ["All"]).slice();
-        const allowed = new Set(state.options.filter(x => x !== "All"));
-        state.selected = new Set(Array.from(state.selected).filter(x => allowed.has(x)));
-        render();
-    }
-    function setSelected(values){
-        state.selected = new Set((values || []).filter(x => x && x !== "All"));
-        render();
-    }
-    function getSelectedValues(){
-        return Array.from(state.selected);
-    }
-    function clear(){
-        state.selected.clear();
-        render();
-    }
-    function onChange(fn){ state.onChange = fn; }
-
-    // init
-    panel.style.display = "none";
-    setOptions(["All"]);
-
-    return { setOptions, setSelected, getSelectedValues, clear, onChange };
-}
-
-/* ===========================
-   App state / widgets
-   =========================== */
-const MS = {
-    branch:      createMultiSelect("ms_branch",      "All Branches"),
-    status:      createMultiSelect("ms_status",      "All Statuses"),
-    age_bucket:  createMultiSelect("ms_age_bucket",  "All Age Buckets"),
-    sr_type:     createMultiSelect("ms_sr_type",     "All SR Types"),
-    hold_reason: createMultiSelect("ms_hold_reason", "All Hold Reasons"),
-    model_name:  createMultiSelect("ms_model_name",  "All Models")
-};
-
 function getParams(){
     const p = new URLSearchParams();
-    const addMulti = (key, widget) => {
-        const vals = widget.getSelectedValues();
-        if (vals && vals.length > 0) p.append(key, vals.join(","));
-    };
-    addMulti("branch",      MS.branch);
-    addMulti("status",      MS.status);
-    addMulti("age_bucket",  MS.age_bucket);
-    addMulti("sr_type",     MS.sr_type);
-    addMulti("hold_reason", MS.hold_reason);
-    addMulti("model_name",  MS.model_name);
-
-    const from_date  = document.getElementById("from_date").value;
-    const to_date    = document.getElementById("to_date").value;
+    const branch = document.getElementById("branch").value;
+    const status = document.getElementById("status").value;
+    const age_bucket = document.getElementById("age_bucket").value;
+    const sr_type = document.getElementById("sr_type").value;
+    const hold_reason = document.getElementById("hold_reason").value;
+    const model_name = document.getElementById("model_name").value;
+    const from_date = document.getElementById("from_date").value;
+    const to_date = document.getElementById("to_date").value;
     const reg_search = document.getElementById("reg_search").value;
 
-    if (from_date)  p.append("from_date",  from_date);
-    if (to_date)    p.append("to_date",    to_date);
-    if (reg_search && reg_search.trim()) p.append("reg_search", reg_search.trim());
+    if (branch && branch !== "All") p.append("branch", branch);
+    if (status && status !== "All") p.append("status", status);
+    if (age_bucket && age_bucket !== "All") p.append("age_bucket", age_bucket);
+    if (sr_type && sr_type !== "All") p.append("sr_type", sr_type);
+    if (hold_reason && hold_reason !== "All") p.append("hold_reason", hold_reason);
+    if (model_name && model_name !== "All") p.append("model_name", model_name);
+    if (from_date) p.append("from_date", from_date);
+    if (to_date) p.append("to_date", to_date);
+    if (reg_search && reg_search.trim() !== "") p.append("reg_search", reg_search.trim());
+
     return p;
 }
 
 async function loadFilterOptions(){
-    const res  = await fetch(`${API}/api/filter-options`);
+    const res = await fetch(`${API}/api/filter-options`);
     const data = await res.json();
-    MS.branch.setOptions(data.branches      || ["All"]);
-    MS.status.setOptions(data.statuses      || ["All"]);
-    MS.age_bucket.setOptions(data.age_buckets  || ["All"]);
-    MS.sr_type.setOptions(data.sr_types      || ["All"]);
-    MS.hold_reason.setOptions(data.hold_reasons || ["All"]);
-    MS.model_name.setOptions(data.model_names  || ["All"]);
+
+    const setOptions = (id, arr) => {
+        const el = document.getElementById(id);
+        el.innerHTML = "";
+        (arr || ["All"]).forEach(v => {
+            const op = document.createElement("option");
+            op.value = v;
+            op.textContent = v;
+            el.appendChild(op);
+        });
+    };
+
+    setOptions("branch", data.branches);
+    setOptions("status", data.statuses);
+    setOptions("age_bucket", data.age_buckets);
+    setOptions("sr_type", data.sr_types);
+    setOptions("hold_reason", data.hold_reasons);
+    setOptions("model_name", data.model_names);
 }
 
 async function loadStats(){
-    const p   = getParams();
+    const p = getParams();
     const res = await fetch(`${API}/api/stats?${p.toString()}`);
-    const s   = await res.json();
+    const s = await res.json();
+
     document.getElementById("kpi_total_ros").textContent = s.total_ros || 0;
-    document.getElementById("kpi_ro_amt").textContent    = inr(s.total_ro_amount   || 0);
+    document.getElementById("kpi_ro_amt").textContent = inr(s.total_ro_amount || 0);
     document.getElementById("kpi_parts_amt").textContent = inr(s.total_parts_amount || 0);
     document.getElementById("kpi_labor_amt").textContent = inr(s.total_labor_amount || 0);
 }
 
 async function loadRows(){
     const limit = document.getElementById("limit").value;
-    const p     = getParams();
-    p.append("skip",  "0");
+    const p = getParams();
+    p.append("skip", "0");
     p.append("limit", String(limit));
 
-    const res  = await fetch(`${API}/api/rows?${p.toString()}`);
+    const res = await fetch(`${API}/api/rows?${p.toString()}`);
     const data = await res.json();
-    const rows = data.rows || [];
 
+    const rows = data.rows || [];
     document.getElementById("tableInfo").textContent =
         `Showing ${rows.length} of ${data.filtered_count} vehicles (Total: ${data.total_count})`;
 
     const tb = document.getElementById("tbody");
     tb.innerHTML = "";
+
     if (rows.length === 0){
-        tb.innerHTML = `<tr><td colspan="16" class="muted">No data found</td></tr>`;
+        tb.innerHTML = `<tr><td colspan="15" class="muted">No data found</td></tr>`;
         return;
     }
+
     rows.forEach(r => {
         tb.innerHTML += `
         <tr>
-            <td class="ro-id">${r.ro_id   || "-"}</td>
-            <td>${r.ro_date   || "-"}</td>
-            <td>${r.branch    || "-"}</td>
+            <td class="ro-id">${r.ro_id || "-"}</td>
+            <td>${r.ro_date || "-"}</td>
+            <td>${r.branch || "-"}</td>
             <td><span class="${badgeClass(r.status)}">${r.status || "-"}</span></td>
-            <td>${r.sr_type   || "-"}</td>
+            <td>${r.sr_type || "-"}</td>
             <td>${r.hold_reason || "-"}</td>
-            <td>${r.sa_name   || "-"}</td>
+            <td>${r.sa_name || "-"}</td>
             <td class="reg">${r.reg_number || "-"}</td>
             <td>${r.model_name || "-"}</td>
-            <td>${r.customer_name || "-"}</td>
             <td>${(r.km || 0).toLocaleString("en-IN")}</td>
             <td>${r.age_bucket || "-"}</td>
             <td>${r.days || 0}</td>
-            <td class="money">${inr(r.total_ro_amount  || 0)}</td>
+            <td class="money">${inr(r.total_ro_amount || 0)}</td>
             <td class="money">${inr(r.total_parts_amount || 0)}</td>
             <td class="money">${inr(r.total_labor_amount || 0)}</td>
         </tr>`;
@@ -1266,37 +908,49 @@ async function refreshAll(){
 }
 
 function clearAll(){
-    Object.values(MS).forEach(w => w.clear());
-    document.getElementById("from_date").value  = "";
-    document.getElementById("to_date").value    = "";
+    document.getElementById("branch").value = "All";
+    document.getElementById("status").value = "All";
+    document.getElementById("age_bucket").value = "All";
+    document.getElementById("sr_type").value = "All";
+    document.getElementById("hold_reason").value = "All";
+    document.getElementById("model_name").value = "All";
+    document.getElementById("from_date").value = "";
+    document.getElementById("to_date").value = "";
     document.getElementById("reg_search").value = "";
-    document.getElementById("limit").value      = "50";
+    document.getElementById("limit").value = "50";
     refreshAll();
 }
 
 function toggleTheme(){
     document.body.classList.toggle("dark");
-    localStorage.setItem("uv_openro_theme",
-        document.body.classList.contains("dark") ? "dark" : "light");
+    const btn = document.getElementById("themeBtn");
+    const isDark = document.body.classList.contains("dark");
+    localStorage.setItem("uv_openro_theme", isDark ? "dark" : "light");
+    btn.textContent = isDark ? "☀️" : "🌙";
 }
 function initTheme(){
-    if (localStorage.getItem("uv_openro_theme") === "dark")
+    const v = localStorage.getItem("uv_openro_theme");
+    if (v === "dark"){
         document.body.classList.add("dark");
+        document.getElementById("themeBtn").textContent = "☀️";
+    }
 }
 
 function hookEvents(){
-    Object.values(MS).forEach(w => w.onChange(() => refreshAll()));
-    document.getElementById("from_date").addEventListener("change", refreshAll);
-    document.getElementById("to_date").addEventListener("change",   refreshAll);
-    document.getElementById("limit").addEventListener("change",     refreshAll);
-    document.getElementById("reg_search").addEventListener("keyup", () => {
-        clearTimeout(window.__t);
-        window.__t = setTimeout(refreshAll, 250);
+    ["branch","status","age_bucket","sr_type","hold_reason","model_name","from_date","to_date","limit"].forEach(id => {
+        document.getElementById(id).addEventListener("change", refreshAll);
     });
-    document.getElementById("clearBtn").addEventListener("click",  clearAll);
-    document.getElementById("themeBtn").addEventListener("click",  toggleTheme);
-    document.getElementById("exportBtn").addEventListener("click", () => {
-        window.location.href = `${API}/api/export?${getParams().toString()}`;
+    document.getElementById("reg_search").addEventListener("keyup", () => {
+        window.clearTimeout(window.__t);
+        window.__t = window.setTimeout(refreshAll, 250);
+    });
+    document.getElementById("clearBtn").addEventListener("click", clearAll);
+    document.getElementById("themeBtn").addEventListener("click", toggleTheme);
+
+    document.getElementById("exportBtn").addEventListener("click", async () => {
+        const p = getParams();
+        const url = `${API}/api/export?${p.toString()}`;
+        window.location.href = url;
     });
 }
 
@@ -1313,20 +967,14 @@ function hookEvents(){
 
 @app.route("/")
 def home():
-    return Response(HTML, mimetype="text/html")
-
+    return Response(HTML.replace("<h1>Unnati Vehicles Open RO Dashboard</h1>", f"<h1>{APP_TITLE}</h1>")
+                    .replace("<title>Unnati Vehicles Open RO Dashboard</title>", f"<title>{APP_TITLE}</title>"),
+                    mimetype="text/html")
 
 # =========================================================
 # MAIN
 # =========================================================
-def open_browser():
-    try:
-        webbrowser.open(f"http://{HOST}:{PORT}", new=2)
-    except Exception:
-        pass
-
-
+# NOTE: On Render we do NOT call app.run(). Gunicorn will run the app.
+# For local run: python app.py
 if __name__ == "__main__":
-    if AUTO_OPEN_BROWSER:
-        threading.Timer(1.0, open_browser).start()
-    app.run(host=HOST, port=PORT, debug=False)
+    app.run(host="0.0.0.0", port=PORT, debug=False)
