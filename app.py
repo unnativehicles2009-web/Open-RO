@@ -33,6 +33,7 @@ CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "120"))
 # HELPERS
 # =========================================================
 def parse_date_any(v):
+    """Parse any date/datetime string, including "DD-MM-YYYY HH.MM" (dot-time format)."""
     if v is None:
         return pd.NaT
     if isinstance(v, (pd.Timestamp, datetime)):
@@ -42,7 +43,7 @@ def parse_date_any(v):
             return pd.NaT
     except Exception:
         pass
-    # Handle Excel/Google Sheets numeric serial date (e.g. 46000.0)
+    # Excel/Google Sheets numeric serial date (e.g. 46000.0)
     try:
         num = float(str(v).strip())
         if not pd.isna(num) and 20000 < num < 100000:
@@ -52,33 +53,42 @@ def parse_date_any(v):
     s = str(v).strip()
     if s in ["", "-", "nan", "NaT", "None", "NaN"]:
         return pd.NaT
+
+    # KEY FIX: normalise dot-time "11-03-2026 10.44" -> "11-03-2026 10:44"
+    # Matches DD-MM-YYYY H.MM or DD-MM-YYYY HH.MM at end of string
+    import re as _re
+    m = _re.match(r"^(\d{2}-\d{2}-\d{4}) (\d{1,2})\.(\d{2})$", s)
+    if m:
+        s = m.group(1) + " " + m.group(2) + ":" + m.group(3)
+
     for fmt in (
-        "%Y-%m-%d",           # 2026-03-15  ISO
-        "%d/%m/%Y",           # 15/03/2026  Indian/UK
+        "%d-%m-%Y %H:%M",     # 11-03-2026 10:44  (normalised from dot-time)
+        "%d-%m-%Y %H:%M:%S",  # 11-03-2026 10:44:00
+        "%d-%m-%Y",           # 11-03-2026
+        "%Y-%m-%d",           # 2026-03-15
+        "%d/%m/%Y",           # 15/03/2026
         "%m/%d/%Y",           # 3/15/2026   Google Sheets US
-        "%d-%m-%Y",           # 15-03-2026
-        "%m/%d/%y",           # 3/15/26     Google Sheets short year
         "%d/%m/%y",           # 15/03/26
         "%d-%m-%y",           # 15-03-26
+        "%m/%d/%y",           # 3/15/26
         "%d-%b-%Y",           # 15-Mar-2026
         "%d %b %Y",           # 15 Mar 2026
         "%b %d, %Y",          # Mar 15, 2026
         "%Y/%m/%d",           # 2026/03/15
         "%d-%b-%y",           # 15-Mar-26
-        "%m/%d/%Y %H:%M:%S",  # 3/15/2026 10:30:00 Google Sheets with time
-        "%d/%m/%Y %H:%M:%S",  # 15/03/2026 10:30:00
-        "%Y-%m-%d %H:%M:%S",  # 2026-03-15 10:30:00
-        "%Y-%m-%dT%H:%M:%S",  # 2026-03-15T10:30:00 ISO with time
+        "%m/%d/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
     ):
         try:
             return pd.to_datetime(s, format=fmt, errors="raise")
         except Exception:
             pass
     # Last resort: pandas auto-detect
-    result = pd.to_datetime(s, errors="coerce", dayfirst=False)
-    if pd.isna(result):
-        result = pd.to_datetime(s, errors="coerce", dayfirst=True)
+    result = pd.to_datetime(s, errors="coerce", dayfirst=True)
     return result
+
 
 def parse_iso_yyyy_mm_dd(s):
     s = (s or "").strip()
