@@ -55,27 +55,26 @@ def parse_date_any(v):
         return pd.NaT
 
     # KEY FIX: normalise dot-time "11-03-2026 10.44" -> "11-03-2026 10:44"
-    # Matches DD-MM-YYYY H.MM or DD-MM-YYYY HH.MM at end of string
     import re as _re
     m = _re.match(r"^(\d{2}-\d{2}-\d{4}) (\d{1,2})\.(\d{2})$", s)
     if m:
         s = m.group(1) + " " + m.group(2) + ":" + m.group(3)
 
     for fmt in (
-        "%d-%m-%Y %H:%M",     # 11-03-2026 10:44  (normalised from dot-time)
-        "%d-%m-%Y %H:%M:%S",  # 11-03-2026 10:44:00
-        "%d-%m-%Y",           # 11-03-2026
-        "%Y-%m-%d",           # 2026-03-15
-        "%d/%m/%Y",           # 15/03/2026
-        "%m/%d/%Y",           # 3/15/2026   Google Sheets US
-        "%d/%m/%y",           # 15/03/26
-        "%d-%m-%y",           # 15-03-26
-        "%m/%d/%y",           # 3/15/26
-        "%d-%b-%Y",           # 15-Mar-2026
-        "%d %b %Y",           # 15 Mar 2026
-        "%b %d, %Y",          # Mar 15, 2026
-        "%Y/%m/%d",           # 2026/03/15
-        "%d-%b-%y",           # 15-Mar-26
+        "%d-%m-%Y %H:%M",
+        "%d-%m-%Y %H:%M:%S",
+        "%d-%m-%Y",
+        "%Y-%m-%d",
+        "%d/%m/%Y",
+        "%m/%d/%Y",
+        "%d/%m/%y",
+        "%d-%m-%y",
+        "%m/%d/%y",
+        "%d-%b-%Y",
+        "%d %b %Y",
+        "%b %d, %Y",
+        "%Y/%m/%d",
+        "%d-%b-%y",
         "%m/%d/%Y %H:%M:%S",
         "%d/%m/%Y %H:%M:%S",
         "%Y-%m-%d %H:%M:%S",
@@ -85,7 +84,6 @@ def parse_date_any(v):
             return pd.to_datetime(s, format=fmt, errors="raise")
         except Exception:
             pass
-    # Last resort: pandas auto-detect
     result = pd.to_datetime(s, errors="coerce", dayfirst=True)
     return result
 
@@ -106,17 +104,12 @@ def clean_money_to_float(x) -> float:
     s = str(x).strip()
     if s in ["", "-", "nan", "NaT", "None"]:
         return 0.0
-
-    # Remove currency text like "Rs", "Rs.", "INR", and ₹
     s = re.sub(r"(?i)\b(rs\.?|inr)\b", "", s)
     s = s.replace("₹", "")
     s = s.replace(",", "").strip()
-
-    # Sometimes value comes like "0.00 " or " 1234"
     try:
         return float(s)
     except Exception:
-        # If it contains any other chars, keep digits+dot+minus only
         s2 = re.sub(r"[^0-9\.\-]", "", s)
         try:
             return float(s2) if s2 else 0.0
@@ -181,7 +174,6 @@ def proper_case_name(s: str) -> str:
     return " ".join([p for p in parts if p])
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    # Clean column names (trim)
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
@@ -241,14 +233,12 @@ def load_data(force: bool = False):
     df = None
     last_error = None
 
-    # 1) Try Google Sheet CSV first
     if GOOGLE_SHEET_CSV_URL:
         try:
             df = _load_from_google_csv(GOOGLE_SHEET_CSV_URL)
         except Exception as e:
             last_error = f"Google CSV load failed: {e}"
 
-    # 2) Fallback Excel (mostly for local use)
     if df is None:
         if EXCEL_PATH and os.path.exists(EXCEL_PATH):
             try:
@@ -267,21 +257,17 @@ def load_data(force: bool = False):
 
     df = normalize_columns(df)
 
-    # Ensure required columns exist
     for c in REQUIRED_COLS:
         if c not in df.columns:
             df[c] = None
 
-    # Detect model column
     MODEL_COL = pick_first_existing_column(df, MODEL_CANDIDATES)
     if MODEL_COL is None:
         df["Model Name"] = None
         MODEL_COL = "Model Name"
 
-    # Dates
     df["RO_DATE_DT"] = df["RO Open Date"].apply(parse_date_any)
 
-    # DEBUG: log to Render logs so you can see what raw values look like
     _sample_raw    = df["RO Open Date"].dropna().head(5).tolist()
     _sample_parsed = df["RO_DATE_DT"].dropna().head(5).tolist()
     _nat_count     = int(df["RO_DATE_DT"].isna().sum())
@@ -295,41 +281,34 @@ def load_data(force: bool = False):
     df.loc[df["DAYS_OPEN"] < 0, "DAYS_OPEN"] = 0
     df["AGE_BUCKET"] = df["DAYS_OPEN"].apply(age_bucket_from_days)
 
-    # Hold reason: blank => "No reason"
     df["HOLD_REASON_CLEAN"] = df["Hold Reason"].apply(lambda x: safe_str(x, "")).astype(str).str.strip()
     df.loc[df["HOLD_REASON_CLEAN"] == "", "HOLD_REASON_CLEAN"] = "No reason"
 
-    # Model name clean
     df["MODEL_NAME_CLEAN"] = df[MODEL_COL].apply(lambda x: safe_str(x, "")).astype(str).str.strip()
     df.loc[df["MODEL_NAME_CLEAN"] == "", "MODEL_NAME_CLEAN"] = "Unknown"
 
-    # Customer name = First + Last (Proper Case)
     fn = df["Owner Contact First Name"].apply(lambda x: safe_str(x, "")).astype(str)
     ln = df["Owner Contact Last Name"].apply(lambda x: safe_str(x, "")).astype(str)
     df["CUSTOMER_NAME"] = (fn.str.strip() + " " + ln.str.strip()).str.strip()
     df["CUSTOMER_NAME"] = df["CUSTOMER_NAME"].apply(proper_case_name)
     df.loc[df["CUSTOMER_NAME"] == "", "CUSTOMER_NAME"] = "Unknown"
 
-    # Money columns (important: your sheet has "Rs" text)
-    df["RO_AMOUNT_NUM"] = df["Total RO Amount"].apply(clean_money_to_float)
+    df["RO_AMOUNT_NUM"]    = df["Total RO Amount"].apply(clean_money_to_float)
     df["PARTS_AMOUNT_NUM"] = df["Total Parts Amount"].apply(clean_money_to_float)
     df["LABOR_AMOUNT_NUM"] = df["Total Labor Amount"].apply(clean_money_to_float)
 
-    # Sort by latest RO date
     df = df.sort_values("RO_DATE_DT", ascending=False, na_position="last").reset_index(drop=True)
 
     DF = df
     _LAST_LOAD_TS = now_ts
     print(f"[OK] Loaded rows: {len(DF)} | model_col: {MODEL_COL} | source: {'google_csv' if GOOGLE_SHEET_CSV_URL else 'excel'}")
 
-# initial load
 load_data(force=True)
 
 # =========================================================
 # FILTERING
 # =========================================================
 def _multi(args, key):
-    """Return list of selected values for a filter key (supports comma-separated)."""
     raw = args.get(key, "") or ""
     vals = [v.strip() for v in raw.split(",") if v.strip() and v.strip() != "All"]
     return vals
@@ -337,15 +316,16 @@ def _multi(args, key):
 def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
     out = df.copy()
 
-    branches    = _multi(args, "branch")
-    statuses    = _multi(args, "status")
-    age_buckets = _multi(args, "age_bucket")
-    sr_types    = _multi(args, "sr_type")
-    hold_reasons= _multi(args, "hold_reason")
-    model_names = _multi(args, "model_name")
-    reg_search  = (args.get("reg_search", "") or "").strip()
-    from_date   = (args.get("from_date", "") or "").strip()
-    to_date     = (args.get("to_date", "") or "").strip()
+    branches     = _multi(args, "branch")
+    statuses     = _multi(args, "status")
+    age_buckets  = _multi(args, "age_bucket")
+    sr_types     = _multi(args, "sr_type")
+    hold_reasons = _multi(args, "hold_reason")
+    model_names  = _multi(args, "model_name")
+    sa_names     = _multi(args, "sa_name")
+    reg_search   = (args.get("reg_search", "") or "").strip()
+    from_date    = (args.get("from_date", "") or "").strip()
+    to_date      = (args.get("to_date", "") or "").strip()
 
     if branches:
         out = out[out["Dealer Code"].astype(str).isin(branches)]
@@ -359,6 +339,8 @@ def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
         out = out[out["HOLD_REASON_CLEAN"].astype(str).isin(hold_reasons)]
     if model_names:
         out = out[out["MODEL_NAME_CLEAN"].astype(str).isin(model_names)]
+    if sa_names:
+        out = out[out["Assigned To Full Name"].astype(str).isin(sa_names)]
 
     if reg_search:
         key = reg_search.upper()
@@ -416,7 +398,6 @@ def health():
 
 @app.route("/api/debug")
 def api_debug():
-    """Shows raw date values — visit this URL in browser to diagnose date parsing."""
     load_data(force=False)
     if DF is None or DF.empty:
         return jsonify({"error": "No data loaded"})
@@ -437,7 +418,6 @@ def api_debug():
         "rows": rows,
     })
 
-
 @app.route("/api/reload")
 def api_reload():
     load_data(force=True)
@@ -454,16 +434,18 @@ def filter_options():
             "sr_types": ["All"],
             "hold_reasons": ["All"],
             "model_names": ["All"],
+            "sa_names": ["All"],
         })
 
-    branches = ["All"] + sorted([safe_str(x) for x in DF["Dealer Code"].dropna().unique().tolist()])
-    statuses = ["All"] + sorted([safe_str(x) for x in DF["Status"].dropna().unique().tolist()])
-    sr_types = ["All"] + sorted([safe_str(x) for x in DF["SR Type"].dropna().unique().tolist()])
+    branches     = ["All"] + sorted([safe_str(x) for x in DF["Dealer Code"].dropna().unique().tolist()])
+    statuses     = ["All"] + sorted([safe_str(x) for x in DF["Status"].dropna().unique().tolist()])
+    sr_types     = ["All"] + sorted([safe_str(x) for x in DF["SR Type"].dropna().unique().tolist()])
     hold_reasons = ["All"] + sorted([safe_str(x) for x in DF["HOLD_REASON_CLEAN"].dropna().unique().tolist()])
-    model_names = ["All"] + sorted([safe_str(x) for x in DF["MODEL_NAME_CLEAN"].dropna().unique().tolist()])
+    model_names  = ["All"] + sorted([safe_str(x) for x in DF["MODEL_NAME_CLEAN"].dropna().unique().tolist()])
+    sa_names     = ["All"] + sorted([safe_str(x) for x in DF["Assigned To Full Name"].dropna().unique().tolist()])
 
     age_order = ["0-3 days", "4-10 days", "11-15 days", "16-30 days", "31-60 days", "Above 60"]
-    present = [x for x in age_order if x in set(DF["AGE_BUCKET"].astype(str).unique())]
+    present   = [x for x in age_order if x in set(DF["AGE_BUCKET"].astype(str).unique())]
     age_buckets = ["All"] + present
 
     return jsonify({
@@ -473,7 +455,31 @@ def filter_options():
         "sr_types": sr_types,
         "hold_reasons": hold_reasons,
         "model_names": model_names,
+        "sa_names": sa_names,
     })
+
+# ── NEW: SA names filtered by selected branch(es) ──────────────────────────
+@app.route("/api/sa-names-by-branch")
+def sa_names_by_branch():
+    """Return SA names belonging to the requested branch(es).
+    Query param: branch=BranchA,BranchB  (empty/All => return all SA names)
+    """
+    load_data(force=False)
+    if DF is None or DF.empty:
+        return jsonify({"sa_names": ["All"]})
+
+    branches = _multi(request.args, "branch")
+    if branches:
+        subset = DF[DF["Dealer Code"].astype(str).isin(branches)]
+    else:
+        subset = DF
+
+    sa_names = ["All"] + sorted([
+        safe_str(x)
+        for x in subset["Assigned To Full Name"].dropna().unique().tolist()
+        if safe_str(x) not in ("-", "")
+    ])
+    return jsonify({"sa_names": sa_names})
 
 @app.route("/api/stats")
 def stats():
@@ -489,7 +495,7 @@ def stats():
     filtered = apply_filters(DF, request.args)
     return jsonify({
         "total_ros": int(len(filtered)),
-        "total_ro_amount": float(filtered["RO_AMOUNT_NUM"].sum()) if "RO_AMOUNT_NUM" in filtered.columns else 0.0,
+        "total_ro_amount":    float(filtered["RO_AMOUNT_NUM"].sum())    if "RO_AMOUNT_NUM"    in filtered.columns else 0.0,
         "total_parts_amount": float(filtered["PARTS_AMOUNT_NUM"].sum()) if "PARTS_AMOUNT_NUM" in filtered.columns else 0.0,
         "total_labor_amount": float(filtered["LABOR_AMOUNT_NUM"].sum()) if "LABOR_AMOUNT_NUM" in filtered.columns else 0.0,
     })
@@ -501,14 +507,14 @@ def rows():
         return jsonify({"total_count": 0, "filtered_count": 0, "rows": []})
 
     limit = int(request.args.get("limit", "50"))
-    skip = int(request.args.get("skip", "0"))
+    skip  = int(request.args.get("skip",  "0"))
 
-    filtered = apply_filters(DF, request.args)
-    total_count = int(len(DF))
-    filtered_count = int(len(filtered))
+    filtered      = apply_filters(DF, request.args)
+    total_count   = int(len(DF))
+    filtered_count= int(len(filtered))
 
     page = filtered.iloc[skip: skip + limit] if limit > 0 else filtered
-    out = [json_row(r) for _, r in page.iterrows()]
+    out  = [json_row(r) for _, r in page.iterrows()]
 
     return jsonify({
         "total_count": total_count,
@@ -527,21 +533,12 @@ def export_excel():
         return jsonify({"error": "No data for filters"})
 
     export_df = pd.DataFrame([json_row(r) for _, r in filtered.iterrows()])
-
     export_df = export_df.rename(columns={
-        "ro_id": "RO ID",
-        "ro_date": "RO Date",
-        "branch": "Branch",
-        "status": "Status",
-        "sr_type": "SR Type",
-        "hold_reason": "Hold Reason",
-        "model_name": "Model Name",
-        "customer_name": "Customer Name",
-        "sa_name": "SA Name",
-        "reg_number": "Reg Number",
-        "km": "KM",
-        "age_bucket": "Age Bucket",
-        "days": "Days",
+        "ro_id": "RO ID", "ro_date": "RO Date", "branch": "Branch",
+        "status": "Status", "sr_type": "SR Type", "hold_reason": "Hold Reason",
+        "model_name": "Model Name", "customer_name": "Customer Name",
+        "sa_name": "SA Name", "reg_number": "Reg Number", "km": "KM",
+        "age_bucket": "Age Bucket", "days": "Days",
         "total_ro_amount": "Total RO Amount",
         "total_parts_amount": "Total Parts Amount",
         "total_labor_amount": "Total Labor Amount",
@@ -552,7 +549,7 @@ def export_excel():
         "SA Name","Reg Number","Customer Name","Model Name","KM",
         "Age Bucket","Days","Total RO Amount","Total Parts Amount","Total Labor Amount"
     ]
-    existing = [c for c in desired_order if c in export_df.columns]
+    existing  = [c for c in desired_order if c in export_df.columns]
     remaining = [c for c in export_df.columns if c not in existing]
     export_df = export_df[existing + remaining]
 
@@ -611,7 +608,6 @@ input[type=date],input[type=text],select{width:100%;padding:10px;border-radius:1
 .ms-trigger::after{content:"▾";position:absolute;right:10px;top:50%;transform:translateY(-50%);font-size:11px;color:#888;pointer-events:none;}
 .ms-trigger.active{border-color:#667eea;box-shadow:0 0 0 2px rgba(102,126,234,.2);}
 
-/* Panel renders fixed to viewport — never clipped by any parent */
 .ms-panel{position:fixed;z-index:99999;background:#fff;border:1px solid #ddd;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.18);padding:10px;display:none;min-width:200px;max-height:280px;overflow:hidden;flex-direction:column;}
 .ms-panel.open{display:flex;}
 .ms-search{width:100%;padding:9px 10px;border-radius:8px;border:1px solid #e0e0e0;font-size:13px;outline:none;margin-bottom:8px;flex-shrink:0;}
@@ -682,6 +678,7 @@ body.dark .flabel{color:#ccc;}
   <div class="filters">
     <div class="filters-grid">
       <div><span class="flabel">Branch</span>         <div class="ms-wrap" id="ms_branch"></div></div>
+      <div><span class="flabel">SA Name</span>        <div class="ms-wrap" id="ms_sa_name"></div></div>
       <div><span class="flabel">RO Status</span>      <div class="ms-wrap" id="ms_status"></div></div>
       <div><span class="flabel">Age Bucket</span>     <div class="ms-wrap" id="ms_age_bucket"></div></div>
       <div><span class="flabel">SR Type</span>        <div class="ms-wrap" id="ms_sr_type"></div></div>
@@ -731,7 +728,7 @@ const API = window.location.origin;
    clipped by overflow:hidden parents.
    Only one panel open at a time via closeAll().
    ────────────────────────────────────────────── */
-const _allWidgets = [];   // registry for closeAll
+const _allWidgets = [];
 
 function MultiSelect(wrapperId, placeholder) {
   const wrap    = document.getElementById(wrapperId);
@@ -750,17 +747,15 @@ function MultiSelect(wrapperId, placeholder) {
     </div>
     <div class="ms-list"></div>`;
 
-  // Append panel to <body> so it's never inside a clipping container
   document.body.appendChild(panel);
   wrap.appendChild(trigger);
 
   const search  = panel.querySelector(".ms-search");
   const list    = panel.querySelector(".ms-list");
-  let options   = [];      // strings, may include "All"
+  let options   = [];
   let selected  = new Set();
   let onChange  = null;
 
-  /* position panel fixed under trigger */
   function reposition() {
     const r  = trigger.getBoundingClientRect();
     const vh = window.innerHeight;
@@ -791,14 +786,12 @@ function MultiSelect(wrapperId, placeholder) {
     const q = search.value.trim().toLowerCase();
     list.innerHTML = "";
 
-    // "All" row
     const allRow = document.createElement("div");
     allRow.className = "ms-item all-row";
     allRow.innerHTML = `<input type="checkbox" ${selected.size===0?"checked":""}/><span class="ms-txt">${placeholder}</span>`;
     allRow.addEventListener("mousedown", e => { e.preventDefault(); selected.clear(); render(); fire(); });
     list.appendChild(allRow);
 
-    // Option rows
     options.filter(o => o !== "All").forEach(opt => {
       if (q && !opt.toLowerCase().includes(q)) return;
       const row = document.createElement("div");
@@ -823,7 +816,7 @@ function MultiSelect(wrapperId, placeholder) {
   function fire() { if (onChange) onChange([...selected]); }
 
   function open() {
-    closeAll();               // close every other panel first
+    closeAll();
     reposition();
     panel.classList.add("open");
     trigger.classList.add("active");
@@ -834,7 +827,6 @@ function MultiSelect(wrapperId, placeholder) {
     if (selected.size === 0) trigger.classList.remove("active");
   }
 
-  // register in global registry
   _allWidgets.push({ close });
 
   trigger.addEventListener("click", e => {
@@ -844,7 +836,6 @@ function MultiSelect(wrapperId, placeholder) {
 
   search.addEventListener("input", render);
   search.addEventListener("click", e => e.stopPropagation());
-
   panel.addEventListener("click", e => e.stopPropagation());
 
   panel.querySelectorAll(".ms-actions button").forEach(btn => {
@@ -859,13 +850,12 @@ function MultiSelect(wrapperId, placeholder) {
     });
   });
 
-  // reposition on scroll/resize
   window.addEventListener("scroll", () => { if (panel.classList.contains("open")) reposition(); }, true);
   window.addEventListener("resize", () => { if (panel.classList.contains("open")) reposition(); });
 
-  // public API
   this.setOptions = arr => {
     options = arr || [];
+    /* keep only selections that still exist in the new option set */
     selected = new Set([...selected].filter(v => options.includes(v)));
     render();
   };
@@ -895,6 +885,7 @@ function badgeClass(s) {
 /* ── Widgets ── */
 const MS = {
   branch:      new MultiSelect("ms_branch",      "All Branches"),
+  sa_name:     new MultiSelect("ms_sa_name",     "All SA Names"),
   status:      new MultiSelect("ms_status",      "All Statuses"),
   age_bucket:  new MultiSelect("ms_age_bucket",  "All Age Buckets"),
   sr_type:     new MultiSelect("ms_sr_type",     "All SR Types"),
@@ -907,6 +898,7 @@ function getParams() {
   const p = new URLSearchParams();
   const add = (key, w) => { const v = w.getValues(); if (v.length) p.append(key, v.join(",")); };
   add("branch",      MS.branch);
+  add("sa_name",     MS.sa_name);
   add("status",      MS.status);
   add("age_bucket",  MS.age_bucket);
   add("sr_type",     MS.sr_type);
@@ -921,11 +913,23 @@ function getParams() {
   return p;
 }
 
+/* ── Reload SA names whenever branch selection changes ── */
+async function reloadSaNames() {
+  const branchVals = MS.branch.getValues();
+  const p = new URLSearchParams();
+  if (branchVals.length) p.append("branch", branchVals.join(","));
+  const res  = await fetch(`${API}/api/sa-names-by-branch?${p}`);
+  const data = await res.json();
+  /* setOptions preserves any selections that are still valid */
+  MS.sa_name.setOptions(data.sa_names || ["All"]);
+}
+
 /* ── Load filter options ── */
 async function loadFilterOptions() {
   const res  = await fetch(`${API}/api/filter-options`);
   const data = await res.json();
   MS.branch.setOptions(data.branches      || ["All"]);
+  MS.sa_name.setOptions(data.sa_names     || ["All"]);
   MS.status.setOptions(data.statuses      || ["All"]);
   MS.age_bucket.setOptions(data.age_buckets  || ["All"]);
   MS.sr_type.setOptions(data.sr_types      || ["All"]);
@@ -985,7 +989,8 @@ function clearAll() {
   document.getElementById("to_date").value    = "";
   document.getElementById("reg_search").value = "";
   document.getElementById("limit").value      = "50";
-  refreshAll();
+  /* restore full SA name list when branch filter is cleared */
+  reloadSaNames().then(refreshAll);
 }
 
 function toggleTheme() {
@@ -1004,7 +1009,21 @@ function initTheme() {
 (async function main() {
   initTheme();
   await loadFilterOptions();
-  Object.values(MS).forEach(w => w.onChange(() => refreshAll()));
+
+  /* Branch change: reload SA names first, then refresh data */
+  MS.branch.onChange(async () => {
+    await reloadSaNames();
+    await refreshAll();
+  });
+
+  /* All other filters just refresh data */
+  MS.sa_name.onChange(refreshAll);
+  MS.status.onChange(refreshAll);
+  MS.age_bucket.onChange(refreshAll);
+  MS.sr_type.onChange(refreshAll);
+  MS.hold_reason.onChange(refreshAll);
+  MS.model_name.onChange(refreshAll);
+
   document.getElementById("from_date").addEventListener("change", refreshAll);
   document.getElementById("to_date").addEventListener("change",   refreshAll);
   document.getElementById("limit").addEventListener("change",     refreshAll);
@@ -1032,7 +1051,5 @@ def home():
 # =========================================================
 # MAIN
 # =========================================================
-# NOTE: On Render we do NOT call app.run(). Gunicorn will run the app.
-# For local run: python app.py
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT, debug=False)
