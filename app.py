@@ -40,7 +40,7 @@ BRANCH_CODE_TO_NAME = {
     "NSKB": "NASHIK SATPUR",
     "PUMB": "CHINCHWAD PUNE",
     "PUME": "HADAPSAR",
-    "JGJB": "Jalgaon",
+    "JGJB": "JALGAON",
 }
 
 def branch_display(code: str) -> str:
