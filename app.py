@@ -116,6 +116,34 @@ def clean_money_to_float(x) -> float:
         except Exception:
             return 0.0
 
+# ── NEW: dedicated odometer cleaner (handles commas, decimals, units) ──────
+def clean_odometer_to_int(x) -> int:
+    """Parse odometer/KM reading to int, handling commas, decimals, units like 'km'."""
+    if x is None:
+        return 0
+    try:
+        if isinstance(x, float) and pd.isna(x):
+            return 0
+        if pd.isna(x):
+            return 0
+    except Exception:
+        pass
+    s = str(x).strip()
+    if s in ["", "-", "nan", "NaT", "None", "NaN"]:
+        return 0
+    # Remove units like "km", "kms", "KM" etc.
+    s = re.sub(r"(?i)\s*kms?\s*$", "", s).strip()
+    # Remove commas (thousands separator)
+    s = s.replace(",", "").strip()
+    try:
+        return int(float(s))
+    except Exception:
+        s2 = re.sub(r"[^0-9\.]", "", s)
+        try:
+            return int(float(s2)) if s2 else 0
+        except Exception:
+            return 0
+
 def age_bucket_from_days(days: int) -> str:
     if days <= 3:
         return "0-3 days"
@@ -297,6 +325,12 @@ def load_data(force: bool = False):
     df["PARTS_AMOUNT_NUM"] = df["Total Parts Amount"].apply(clean_money_to_float)
     df["LABOR_AMOUNT_NUM"] = df["Total Labor Amount"].apply(clean_money_to_float)
 
+    # ── FIX: pre-clean Odometer Reading into a dedicated int column ──────────
+    df["ODOMETER_NUM"] = df["Odometer Reading"].apply(clean_odometer_to_int)
+    _odo_sample = df["ODOMETER_NUM"].head(5).tolist()
+    print(f"[ODO] sample cleaned values: {_odo_sample}")
+    # ────────────────────────────────────────────────────────────────────────
+
     df = df.sort_values("RO_DATE_DT", ascending=False, na_position="last").reset_index(drop=True)
 
     DF = df
@@ -371,7 +405,9 @@ def json_row(r) -> dict:
         "customer_name": safe_str(r.get("CUSTOMER_NAME")),
         "sa_name": safe_str(r.get("Assigned To Full Name")),
         "reg_number": safe_str(r.get("Vehicle Registration No")),
-        "km": to_int_safe(r.get("Odometer Reading"), 0),
+        # ── FIX: use pre-cleaned ODOMETER_NUM instead of raw Odometer Reading ──
+        "km": int(r.get("ODOMETER_NUM") or 0),
+        # ───────────────────────────────────────────────────────────────────────
         "age_bucket": safe_str(r.get("AGE_BUCKET")),
         "days": to_int_safe(r.get("DAYS_OPEN"), 0),
         "total_ro_amount": float(r.get("RO_AMOUNT_NUM", 0.0) or 0.0),
@@ -409,12 +445,16 @@ def api_debug():
             "parsed_ro_date_dt": str(r.get("RO_DATE_DT", "")),
             "days_open": int(r.get("DAYS_OPEN", 0)),
             "age_bucket": str(r.get("AGE_BUCKET", "")),
+            "raw_odometer": str(r.get("Odometer Reading", "")),
+            "parsed_odometer": int(r.get("ODOMETER_NUM", 0)),
         })
     return jsonify({
         "total_rows": len(DF),
         "nat_count": nat_count,
         "sample_raw_dates": DF["RO Open Date"].dropna().head(5).tolist(),
         "age_buckets_present": sorted(DF["AGE_BUCKET"].unique().tolist()) if "AGE_BUCKET" in DF.columns else [],
+        "sample_odometer_raw": DF["Odometer Reading"].dropna().head(5).tolist(),
+        "sample_odometer_parsed": DF["ODOMETER_NUM"].head(5).tolist() if "ODOMETER_NUM" in DF.columns else [],
         "rows": rows,
     })
 
@@ -458,7 +498,7 @@ def filter_options():
         "sa_names": sa_names,
     })
 
-# ── NEW: SA names filtered by selected branch(es) ──────────────────────────
+# ── SA names filtered by selected branch(es) ──────────────────────────
 @app.route("/api/sa-names-by-branch")
 def sa_names_by_branch():
     """Return SA names belonging to the requested branch(es).
