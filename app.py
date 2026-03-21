@@ -116,7 +116,6 @@ def clean_money_to_float(x) -> float:
         except Exception:
             return 0.0
 
-# ── NEW: dedicated odometer cleaner (handles commas, decimals, units) ──────
 def clean_odometer_to_int(x) -> int:
     """Parse odometer/KM reading to int, handling commas, decimals, units like 'km'."""
     if x is None:
@@ -325,11 +324,9 @@ def load_data(force: bool = False):
     df["PARTS_AMOUNT_NUM"] = df["Total Parts Amount"].apply(clean_money_to_float)
     df["LABOR_AMOUNT_NUM"] = df["Total Labor Amount"].apply(clean_money_to_float)
 
-    # ── FIX: pre-clean Odometer Reading into a dedicated int column ──────────
     df["ODOMETER_NUM"] = df["Odometer Reading"].apply(clean_odometer_to_int)
     _odo_sample = df["ODOMETER_NUM"].head(5).tolist()
     print(f"[ODO] sample cleaned values: {_odo_sample}")
-    # ────────────────────────────────────────────────────────────────────────
 
     df = df.sort_values("RO_DATE_DT", ascending=False, na_position="last").reset_index(drop=True)
 
@@ -353,6 +350,7 @@ def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
     branches     = _multi(args, "branch")
     statuses     = _multi(args, "status")
     age_buckets  = _multi(args, "age_bucket")
+    # sr_type kept in backend for API compatibility even though UI dropdown is removed
     sr_types     = _multi(args, "sr_type")
     hold_reasons = _multi(args, "hold_reason")
     model_names  = _multi(args, "model_name")
@@ -405,9 +403,7 @@ def json_row(r) -> dict:
         "customer_name": safe_str(r.get("CUSTOMER_NAME")),
         "sa_name": safe_str(r.get("Assigned To Full Name")),
         "reg_number": safe_str(r.get("Vehicle Registration No")),
-        # ── FIX: use pre-cleaned ODOMETER_NUM instead of raw Odometer Reading ──
         "km": int(r.get("ODOMETER_NUM") or 0),
-        # ───────────────────────────────────────────────────────────────────────
         "age_bucket": safe_str(r.get("AGE_BUCKET")),
         "days": to_int_safe(r.get("DAYS_OPEN"), 0),
         "total_ro_amount": float(r.get("RO_AMOUNT_NUM", 0.0) or 0.0),
@@ -471,7 +467,6 @@ def filter_options():
             "branches": ["All"],
             "statuses": ["All"],
             "age_buckets": ["All"],
-            "sr_types": ["All"],
             "hold_reasons": ["All"],
             "model_names": ["All"],
             "sa_names": ["All"],
@@ -479,7 +474,7 @@ def filter_options():
 
     branches     = ["All"] + sorted([safe_str(x) for x in DF["Dealer Code"].dropna().unique().tolist()])
     statuses     = ["All"] + sorted([safe_str(x) for x in DF["Status"].dropna().unique().tolist()])
-    sr_types     = ["All"] + sorted([safe_str(x) for x in DF["SR Type"].dropna().unique().tolist()])
+    # sr_types removed from filter-options response (UI dropdown removed)
     hold_reasons = ["All"] + sorted([safe_str(x) for x in DF["HOLD_REASON_CLEAN"].dropna().unique().tolist()])
     model_names  = ["All"] + sorted([safe_str(x) for x in DF["MODEL_NAME_CLEAN"].dropna().unique().tolist()])
     sa_names     = ["All"] + sorted([safe_str(x) for x in DF["Assigned To Full Name"].dropna().unique().tolist()])
@@ -492,7 +487,6 @@ def filter_options():
         "branches": branches,
         "statuses": statuses,
         "age_buckets": age_buckets,
-        "sr_types": sr_types,
         "hold_reasons": hold_reasons,
         "model_names": model_names,
         "sa_names": sa_names,
@@ -721,7 +715,6 @@ body.dark .flabel{color:#ccc;}
       <div><span class="flabel">SA Name</span>        <div class="ms-wrap" id="ms_sa_name"></div></div>
       <div><span class="flabel">RO Status</span>      <div class="ms-wrap" id="ms_status"></div></div>
       <div><span class="flabel">Age Bucket</span>     <div class="ms-wrap" id="ms_age_bucket"></div></div>
-      <div><span class="flabel">SR Type</span>        <div class="ms-wrap" id="ms_sr_type"></div></div>
       <div><span class="flabel">Hold Reason</span>    <div class="ms-wrap" id="ms_hold_reason"></div></div>
       <div><span class="flabel">Model Name</span>     <div class="ms-wrap" id="ms_model_name"></div></div>
       <div><span class="flabel">From Date</span>      <input type="date" id="from_date"/></div>
@@ -922,18 +915,17 @@ function badgeClass(s) {
   return "badge badge-green";
 }
 
-/* ── Widgets ── */
+/* ── Widgets — SR Type filter dropdown removed ── */
 const MS = {
   branch:      new MultiSelect("ms_branch",      "All Branches"),
   sa_name:     new MultiSelect("ms_sa_name",     "All SA Names"),
   status:      new MultiSelect("ms_status",      "All Statuses"),
   age_bucket:  new MultiSelect("ms_age_bucket",  "All Age Buckets"),
-  sr_type:     new MultiSelect("ms_sr_type",     "All SR Types"),
   hold_reason: new MultiSelect("ms_hold_reason", "All Hold Reasons"),
   model_name:  new MultiSelect("ms_model_name",  "All Models"),
 };
 
-/* ── Params ── */
+/* ── Params — sr_type excluded from query params ── */
 function getParams() {
   const p = new URLSearchParams();
   const add = (key, w) => { const v = w.getValues(); if (v.length) p.append(key, v.join(",")); };
@@ -941,7 +933,6 @@ function getParams() {
   add("sa_name",     MS.sa_name);
   add("status",      MS.status);
   add("age_bucket",  MS.age_bucket);
-  add("sr_type",     MS.sr_type);
   add("hold_reason", MS.hold_reason);
   add("model_name",  MS.model_name);
   const fd = document.getElementById("from_date").value;
@@ -964,7 +955,7 @@ async function reloadSaNames() {
   MS.sa_name.setOptions(data.sa_names || ["All"]);
 }
 
-/* ── Load filter options ── */
+/* ── Load filter options — sr_types not populated ── */
 async function loadFilterOptions() {
   const res  = await fetch(`${API}/api/filter-options`);
   const data = await res.json();
@@ -972,7 +963,6 @@ async function loadFilterOptions() {
   MS.sa_name.setOptions(data.sa_names     || ["All"]);
   MS.status.setOptions(data.statuses      || ["All"]);
   MS.age_bucket.setOptions(data.age_buckets  || ["All"]);
-  MS.sr_type.setOptions(data.sr_types      || ["All"]);
   MS.hold_reason.setOptions(data.hold_reasons || ["All"]);
   MS.model_name.setOptions(data.model_names  || ["All"]);
 }
@@ -1060,7 +1050,6 @@ function initTheme() {
   MS.sa_name.onChange(refreshAll);
   MS.status.onChange(refreshAll);
   MS.age_bucket.onChange(refreshAll);
-  MS.sr_type.onChange(refreshAll);
   MS.hold_reason.onChange(refreshAll);
   MS.model_name.onChange(refreshAll);
 
