@@ -13,27 +13,22 @@ from flask import Flask, jsonify, request, send_file, Response
 # =========================================================
 APP_TITLE = os.environ.get("APP_TITLE", "Unnati Vehicles Open RO Dashboard")
 
-# Render provides PORT automatically
 PORT = int(os.environ.get("PORT", "5000"))
 
-# Google Sheet Published CSV (recommended)
 GOOGLE_SHEET_CSV_URL = os.environ.get(
     "GOOGLE_SHEET_CSV_URL",
     "https://docs.google.com/spreadsheets/d/e/2PACX-1vS5ZtziwobOOI3q4nOCyd0bJoQk0IW7GtSeszy23yLveqRZHBZJajVw7BTFngJnREqS8xaIH93RzGOe/pub?gid=0&single=true&output=csv",
 )
 
-# Optional fallback to Excel (local only; not useful on Render unless you upload file to repo)
 EXCEL_PATH = os.environ.get("OPEN_RO_XLSX", "")
 SHEET_NAME = os.environ.get("OPEN_RO_SHEET", "Details")
 
-# Cache refresh (seconds)
 CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "120"))
 
 # =========================================================
 # HELPERS
 # =========================================================
 def parse_date_any(v):
-    """Parse any date/datetime string, including "DD-MM-YYYY HH.MM" (dot-time format)."""
     if v is None:
         return pd.NaT
     if isinstance(v, (pd.Timestamp, datetime)):
@@ -43,7 +38,6 @@ def parse_date_any(v):
             return pd.NaT
     except Exception:
         pass
-    # Excel/Google Sheets numeric serial date (e.g. 46000.0)
     try:
         num = float(str(v).strip())
         if not pd.isna(num) and 20000 < num < 100000:
@@ -54,38 +48,24 @@ def parse_date_any(v):
     if s in ["", "-", "nan", "NaT", "None", "NaN"]:
         return pd.NaT
 
-    # KEY FIX: normalise dot-time "11-03-2026 10.44" -> "11-03-2026 10:44"
     import re as _re
     m = _re.match(r"^(\d{2}-\d{2}-\d{4}) (\d{1,2})\.(\d{2})$", s)
     if m:
         s = m.group(1) + " " + m.group(2) + ":" + m.group(3)
 
     for fmt in (
-        "%d-%m-%Y %H:%M",
-        "%d-%m-%Y %H:%M:%S",
-        "%d-%m-%Y",
-        "%Y-%m-%d",
-        "%d/%m/%Y",
-        "%m/%d/%Y",
-        "%d/%m/%y",
-        "%d-%m-%y",
-        "%m/%d/%y",
-        "%d-%b-%Y",
-        "%d %b %Y",
-        "%b %d, %Y",
-        "%Y/%m/%d",
-        "%d-%b-%y",
-        "%m/%d/%Y %H:%M:%S",
-        "%d/%m/%Y %H:%M:%S",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S",
+        "%d-%m-%Y %H:%M", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y",
+        "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d/%m/%y",
+        "%d-%m-%y", "%m/%d/%y", "%d-%b-%Y", "%d %b %Y",
+        "%b %d, %Y", "%Y/%m/%d", "%d-%b-%y",
+        "%m/%d/%Y %H:%M:%S", "%d/%m/%Y %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S",
     ):
         try:
             return pd.to_datetime(s, format=fmt, errors="raise")
         except Exception:
             pass
-    result = pd.to_datetime(s, errors="coerce", dayfirst=True)
-    return result
+    return pd.to_datetime(s, errors="coerce", dayfirst=True)
 
 
 def parse_iso_yyyy_mm_dd(s):
@@ -98,6 +78,7 @@ def parse_iso_yyyy_mm_dd(s):
         dt = pd.to_datetime(s, errors="coerce", dayfirst=True)
         return None if pd.isna(dt) else dt
 
+
 def clean_money_to_float(x) -> float:
     if x is None or (isinstance(x, float) and pd.isna(x)) or pd.isna(x):
         return 0.0
@@ -105,8 +86,7 @@ def clean_money_to_float(x) -> float:
     if s in ["", "-", "nan", "NaT", "None"]:
         return 0.0
     s = re.sub(r"(?i)\b(rs\.?|inr)\b", "", s)
-    s = s.replace("₹", "")
-    s = s.replace(",", "").strip()
+    s = s.replace("₹", "").replace(",", "").strip()
     try:
         return float(s)
     except Exception:
@@ -116,8 +96,8 @@ def clean_money_to_float(x) -> float:
         except Exception:
             return 0.0
 
+
 def clean_odometer_to_int(x) -> int:
-    """Parse odometer/KM reading to int, handling commas, decimals, units like 'km'."""
     if x is None:
         return 0
     try:
@@ -130,9 +110,7 @@ def clean_odometer_to_int(x) -> int:
     s = str(x).strip()
     if s in ["", "-", "nan", "NaT", "None", "NaN"]:
         return 0
-    # Remove units like "km", "kms", "KM" etc.
     s = re.sub(r"(?i)\s*kms?\s*$", "", s).strip()
-    # Remove commas (thousands separator)
     s = s.replace(",", "").strip()
     try:
         return int(float(s))
@@ -143,24 +121,22 @@ def clean_odometer_to_int(x) -> int:
         except Exception:
             return 0
 
+
 def age_bucket_from_days(days: int) -> str:
-    if days <= 3:
-        return "0-3 days"
-    if days <= 10:
-        return "4-10 days"
-    if days <= 15:
-        return "11-15 days"
-    if days <= 30:
-        return "16-30 days"
-    if days <= 60:
-        return "31-60 days"
+    if days <= 3:   return "0-3 days"
+    if days <= 10:  return "4-10 days"
+    if days <= 15:  return "11-15 days"
+    if days <= 30:  return "16-30 days"
+    if days <= 60:  return "31-60 days"
     return "Above 60"
+
 
 def safe_str(v, default="-"):
     if v is None or (isinstance(v, float) and pd.isna(v)) or pd.isna(v):
         return default
     s = str(v).strip()
     return default if s == "" else s
+
 
 def fmt_ddmmyyyy(ts):
     if ts is None or (isinstance(ts, float) and pd.isna(ts)) or pd.isna(ts):
@@ -173,6 +149,7 @@ def fmt_ddmmyyyy(ts):
     except Exception:
         return "-"
 
+
 def to_int_safe(v, default=0):
     try:
         if v is None or (isinstance(v, float) and pd.isna(v)) or pd.isna(v):
@@ -181,16 +158,17 @@ def to_int_safe(v, default=0):
     except Exception:
         return default
 
+
 def pick_first_existing_column(df: pd.DataFrame, candidates):
     if df is None or df.empty:
         return None
-    cols = list(df.columns)
-    lower_map = {str(c).strip().lower(): c for c in cols}
+    lower_map = {str(c).strip().lower(): c for c in df.columns}
     for cand in candidates:
         key = str(cand).strip().lower()
         if key in lower_map:
             return lower_map[key]
     return None
+
 
 def proper_case_name(s: str) -> str:
     s = (s or "").strip()
@@ -200,9 +178,11 @@ def proper_case_name(s: str) -> str:
     parts = [p[:1].upper() + p[1:].lower() if p else "" for p in parts]
     return " ".join([p for p in parts if p])
 
+
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [str(c).strip() for c in df.columns]
     return df
+
 
 # =========================================================
 # LOAD + PREPARE DATA (with caching)
@@ -212,49 +192,36 @@ MODEL_COL = None
 _LAST_LOAD_TS: Optional[float] = None
 
 REQUIRED_COLS = [
-    "Dealer Code",
-    "Repair Order #",
-    "RO Open Date",
-    "Vehicle Registration No",
-    "VIN #",
-    "Odometer Reading",
-    "Assigned To Full Name",
-    "Status",
-    "SR Type",
-    "Hold Reason",
-    "Total RO Amount",
-    "Total Parts Amount",
-    "Total Labor Amount",
-    "Owner Contact First Name",
-    "Owner Contact Last Name",
+    "Dealer Code", "Repair Order #", "RO Open Date",
+    "Vehicle Registration No", "VIN #", "Odometer Reading",
+    "Assigned To Full Name", "Status", "SR Type",
+    "RO Type",          # ── NEW ──
+    "Hold Reason", "Total RO Amount", "Total Parts Amount",
+    "Total Labor Amount", "Owner Contact First Name", "Owner Contact Last Name",
 ]
 
 MODEL_CANDIDATES = [
-    "Model Name",
-    "Model",
-    "Model_Name",
-    "MODEL NAME",
-    "MODEL",
-    "Model Group",
-    "ModelGroup",
-    "MODEL GROUP",
+    "Model Name", "Model", "Model_Name", "MODEL NAME",
+    "MODEL", "Model Group", "ModelGroup", "MODEL GROUP",
 ]
+
 
 def _load_from_google_csv(url: str) -> pd.DataFrame:
     r = requests.get(url, timeout=30)
     r.raise_for_status()
-    bio = io.BytesIO(r.content)
-    df = pd.read_csv(bio)
-    return df
+    return pd.read_csv(io.BytesIO(r.content))
+
 
 def _load_from_excel(path: str, sheet: str) -> pd.DataFrame:
     return pd.read_excel(path, sheet_name=sheet)
+
 
 def load_data(force: bool = False):
     global DF, MODEL_COL, _LAST_LOAD_TS
 
     now_ts = datetime.utcnow().timestamp()
-    if (not force) and _LAST_LOAD_TS and (now_ts - _LAST_LOAD_TS) < CACHE_TTL_SECONDS and (DF is not None) and (not DF.empty):
+    if (not force) and _LAST_LOAD_TS and (now_ts - _LAST_LOAD_TS) < CACHE_TTL_SECONDS \
+            and (DF is not None) and (not DF.empty):
         return
 
     df = None
@@ -325,8 +292,13 @@ def load_data(force: bool = False):
     df["LABOR_AMOUNT_NUM"] = df["Total Labor Amount"].apply(clean_money_to_float)
 
     df["ODOMETER_NUM"] = df["Odometer Reading"].apply(clean_odometer_to_int)
-    _odo_sample = df["ODOMETER_NUM"].head(5).tolist()
-    print(f"[ODO] sample cleaned values: {_odo_sample}")
+    print(f"[ODO] sample cleaned values: {df['ODOMETER_NUM'].head(5).tolist()}")
+
+    # ── NEW: clean RO Type ──────────────────────────────────────────────────
+    df["RO_TYPE_CLEAN"] = df["RO Type"].apply(lambda x: safe_str(x, "")).astype(str).str.strip()
+    df.loc[df["RO_TYPE_CLEAN"] == "", "RO_TYPE_CLEAN"] = "Unknown"
+    print(f"[RO_TYPE] unique values: {sorted(df['RO_TYPE_CLEAN'].unique().tolist())}")
+    # ────────────────────────────────────────────────────────────────────────
 
     df = df.sort_values("RO_DATE_DT", ascending=False, na_position="last").reset_index(drop=True)
 
@@ -334,15 +306,17 @@ def load_data(force: bool = False):
     _LAST_LOAD_TS = now_ts
     print(f"[OK] Loaded rows: {len(DF)} | model_col: {MODEL_COL} | source: {'google_csv' if GOOGLE_SHEET_CSV_URL else 'excel'}")
 
+
 load_data(force=True)
+
 
 # =========================================================
 # FILTERING
 # =========================================================
 def _multi(args, key):
     raw = args.get(key, "") or ""
-    vals = [v.strip() for v in raw.split(",") if v.strip() and v.strip() != "All"]
-    return vals
+    return [v.strip() for v in raw.split(",") if v.strip() and v.strip() != "All"]
+
 
 def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
     out = df.copy()
@@ -350,14 +324,14 @@ def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
     branches     = _multi(args, "branch")
     statuses     = _multi(args, "status")
     age_buckets  = _multi(args, "age_bucket")
-    # sr_type kept in backend for API compatibility even though UI dropdown is removed
-    sr_types     = _multi(args, "sr_type")
+    sr_types     = _multi(args, "sr_type")     # kept for API compatibility
+    ro_types     = _multi(args, "ro_type")     # ── NEW ──
     hold_reasons = _multi(args, "hold_reason")
     model_names  = _multi(args, "model_name")
     sa_names     = _multi(args, "sa_name")
     reg_search   = (args.get("reg_search", "") or "").strip()
-    from_date    = (args.get("from_date", "") or "").strip()
-    to_date      = (args.get("to_date", "") or "").strip()
+    from_date    = (args.get("from_date",  "") or "").strip()
+    to_date      = (args.get("to_date",    "") or "").strip()
 
     if branches:
         out = out[out["Dealer Code"].astype(str).isin(branches)]
@@ -367,6 +341,8 @@ def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
         out = out[out["AGE_BUCKET"].astype(str).isin(age_buckets)]
     if sr_types:
         out = out[out["SR Type"].astype(str).isin(sr_types)]
+    if ro_types:                                                      # ── NEW ──
+        out = out[out["RO_TYPE_CLEAN"].astype(str).isin(ro_types)]   # ── NEW ──
     if hold_reasons:
         out = out[out["HOLD_REASON_CLEAN"].astype(str).isin(hold_reasons)]
     if model_names:
@@ -382,7 +358,7 @@ def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
         out["RO_DATE_DT"] = out["RO Open Date"].apply(parse_date_any)
 
     fd = parse_iso_yyyy_mm_dd(from_date) if from_date else None
-    td = parse_iso_yyyy_mm_dd(to_date) if to_date else None
+    td = parse_iso_yyyy_mm_dd(to_date)   if to_date   else None
     if fd is not None:
         out = out[out["RO_DATE_DT"] >= fd]
     if td is not None:
@@ -391,42 +367,48 @@ def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
 
     return out
 
+
 def json_row(r) -> dict:
     return {
-        "ro_id": safe_str(r.get("Repair Order #")),
-        "ro_date": fmt_ddmmyyyy(r.get("RO_DATE_DT")),
-        "branch": safe_str(r.get("Dealer Code")),
-        "status": safe_str(r.get("Status")),
-        "sr_type": safe_str(r.get("SR Type")),
-        "hold_reason": safe_str(r.get("HOLD_REASON_CLEAN")),
-        "model_name": safe_str(r.get("MODEL_NAME_CLEAN")),
-        "customer_name": safe_str(r.get("CUSTOMER_NAME")),
-        "sa_name": safe_str(r.get("Assigned To Full Name")),
-        "reg_number": safe_str(r.get("Vehicle Registration No")),
-        "km": int(r.get("ODOMETER_NUM") or 0),
-        "age_bucket": safe_str(r.get("AGE_BUCKET")),
-        "days": to_int_safe(r.get("DAYS_OPEN"), 0),
-        "total_ro_amount": float(r.get("RO_AMOUNT_NUM", 0.0) or 0.0),
+        "ro_id":              safe_str(r.get("Repair Order #")),
+        "ro_date":            fmt_ddmmyyyy(r.get("RO_DATE_DT")),
+        "branch":             safe_str(r.get("Dealer Code")),
+        "status":             safe_str(r.get("Status")),
+        "sr_type":            safe_str(r.get("SR Type")),
+        "ro_type":            safe_str(r.get("RO_TYPE_CLEAN")),   # ── NEW ──
+        "hold_reason":        safe_str(r.get("HOLD_REASON_CLEAN")),
+        "model_name":         safe_str(r.get("MODEL_NAME_CLEAN")),
+        "customer_name":      safe_str(r.get("CUSTOMER_NAME")),
+        "sa_name":            safe_str(r.get("Assigned To Full Name")),
+        "reg_number":         safe_str(r.get("Vehicle Registration No")),
+        "km":                 int(r.get("ODOMETER_NUM") or 0),
+        "age_bucket":         safe_str(r.get("AGE_BUCKET")),
+        "days":               to_int_safe(r.get("DAYS_OPEN"), 0),
+        "total_ro_amount":    float(r.get("RO_AMOUNT_NUM",    0.0) or 0.0),
         "total_parts_amount": float(r.get("PARTS_AMOUNT_NUM", 0.0) or 0.0),
         "total_labor_amount": float(r.get("LABOR_AMOUNT_NUM", 0.0) or 0.0),
     }
+
 
 # =========================================================
 # FLASK APP
 # =========================================================
 app = Flask(__name__)
 
+
 @app.after_request
 def add_cors_headers(resp):
-    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Origin"]  = "*"
     resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization"
     return resp
+
 
 @app.route("/health")
 def health():
     load_data(force=False)
     return jsonify({"status": "ok", "rows": int(len(DF)) if DF is not None else 0})
+
 
 @app.route("/api/debug")
 def api_debug():
@@ -437,102 +419,98 @@ def api_debug():
     rows = []
     for _, r in DF.head(10).iterrows():
         rows.append({
-            "raw_ro_open_date": str(r.get("RO Open Date", "")),
+            "raw_ro_open_date":  str(r.get("RO Open Date", "")),
             "parsed_ro_date_dt": str(r.get("RO_DATE_DT", "")),
-            "days_open": int(r.get("DAYS_OPEN", 0)),
-            "age_bucket": str(r.get("AGE_BUCKET", "")),
-            "raw_odometer": str(r.get("Odometer Reading", "")),
-            "parsed_odometer": int(r.get("ODOMETER_NUM", 0)),
+            "days_open":         int(r.get("DAYS_OPEN", 0)),
+            "age_bucket":        str(r.get("AGE_BUCKET", "")),
+            "raw_odometer":      str(r.get("Odometer Reading", "")),
+            "parsed_odometer":   int(r.get("ODOMETER_NUM", 0)),
+            "ro_type":           str(r.get("RO_TYPE_CLEAN", "")),
         })
     return jsonify({
-        "total_rows": len(DF),
-        "nat_count": nat_count,
-        "sample_raw_dates": DF["RO Open Date"].dropna().head(5).tolist(),
-        "age_buckets_present": sorted(DF["AGE_BUCKET"].unique().tolist()) if "AGE_BUCKET" in DF.columns else [],
-        "sample_odometer_raw": DF["Odometer Reading"].dropna().head(5).tolist(),
+        "total_rows":             len(DF),
+        "nat_count":              nat_count,
+        "sample_raw_dates":       DF["RO Open Date"].dropna().head(5).tolist(),
+        "age_buckets_present":    sorted(DF["AGE_BUCKET"].unique().tolist()) if "AGE_BUCKET" in DF.columns else [],
+        "sample_odometer_raw":    DF["Odometer Reading"].dropna().head(5).tolist(),
         "sample_odometer_parsed": DF["ODOMETER_NUM"].head(5).tolist() if "ODOMETER_NUM" in DF.columns else [],
-        "rows": rows,
+        "ro_types_present":       sorted(DF["RO_TYPE_CLEAN"].unique().tolist()) if "RO_TYPE_CLEAN" in DF.columns else [],
+        "rows":                   rows,
     })
+
 
 @app.route("/api/reload")
 def api_reload():
     load_data(force=True)
     return jsonify({"ok": True, "rows": int(len(DF)), "model_col": MODEL_COL})
 
+
 @app.route("/api/filter-options")
 def filter_options():
     load_data(force=False)
     if DF is None or DF.empty:
         return jsonify({
-            "branches": ["All"],
-            "statuses": ["All"],
-            "age_buckets": ["All"],
-            "hold_reasons": ["All"],
-            "model_names": ["All"],
-            "sa_names": ["All"],
+            "branches": ["All"], "statuses": ["All"], "age_buckets": ["All"],
+            "ro_types": ["All"],                           # ── NEW ──
+            "hold_reasons": ["All"], "model_names": ["All"], "sa_names": ["All"],
         })
 
-    branches     = ["All"] + sorted([safe_str(x) for x in DF["Dealer Code"].dropna().unique().tolist()])
-    statuses     = ["All"] + sorted([safe_str(x) for x in DF["Status"].dropna().unique().tolist()])
-    # sr_types removed from filter-options response (UI dropdown removed)
-    hold_reasons = ["All"] + sorted([safe_str(x) for x in DF["HOLD_REASON_CLEAN"].dropna().unique().tolist()])
-    model_names  = ["All"] + sorted([safe_str(x) for x in DF["MODEL_NAME_CLEAN"].dropna().unique().tolist()])
-    sa_names     = ["All"] + sorted([safe_str(x) for x in DF["Assigned To Full Name"].dropna().unique().tolist()])
+    branches     = ["All"] + sorted([safe_str(x) for x in DF["Dealer Code"].dropna().unique()])
+    statuses     = ["All"] + sorted([safe_str(x) for x in DF["Status"].dropna().unique()])
+    hold_reasons = ["All"] + sorted([safe_str(x) for x in DF["HOLD_REASON_CLEAN"].dropna().unique()])
+    model_names  = ["All"] + sorted([safe_str(x) for x in DF["MODEL_NAME_CLEAN"].dropna().unique()])
+    sa_names     = ["All"] + sorted([safe_str(x) for x in DF["Assigned To Full Name"].dropna().unique()])
 
-    age_order = ["0-3 days", "4-10 days", "11-15 days", "16-30 days", "31-60 days", "Above 60"]
-    present   = [x for x in age_order if x in set(DF["AGE_BUCKET"].astype(str).unique())]
+    # ── NEW: RO Type options ─────────────────────────────────────────────────
+    ro_types     = ["All"] + sorted([safe_str(x) for x in DF["RO_TYPE_CLEAN"].dropna().unique()])
+    # ────────────────────────────────────────────────────────────────────────
+
+    age_order   = ["0-3 days","4-10 days","11-15 days","16-30 days","31-60 days","Above 60"]
+    present     = [x for x in age_order if x in set(DF["AGE_BUCKET"].astype(str).unique())]
     age_buckets = ["All"] + present
 
     return jsonify({
-        "branches": branches,
-        "statuses": statuses,
+        "branches":    branches,
+        "statuses":    statuses,
         "age_buckets": age_buckets,
+        "ro_types":    ro_types,       # ── NEW ──
         "hold_reasons": hold_reasons,
         "model_names": model_names,
-        "sa_names": sa_names,
+        "sa_names":    sa_names,
     })
 
-# ── SA names filtered by selected branch(es) ──────────────────────────
+
 @app.route("/api/sa-names-by-branch")
 def sa_names_by_branch():
-    """Return SA names belonging to the requested branch(es).
-    Query param: branch=BranchA,BranchB  (empty/All => return all SA names)
-    """
     load_data(force=False)
     if DF is None or DF.empty:
         return jsonify({"sa_names": ["All"]})
 
     branches = _multi(request.args, "branch")
-    if branches:
-        subset = DF[DF["Dealer Code"].astype(str).isin(branches)]
-    else:
-        subset = DF
+    subset   = DF[DF["Dealer Code"].astype(str).isin(branches)] if branches else DF
 
     sa_names = ["All"] + sorted([
-        safe_str(x)
-        for x in subset["Assigned To Full Name"].dropna().unique().tolist()
+        safe_str(x) for x in subset["Assigned To Full Name"].dropna().unique()
         if safe_str(x) not in ("-", "")
     ])
     return jsonify({"sa_names": sa_names})
+
 
 @app.route("/api/stats")
 def stats():
     load_data(force=False)
     if DF is None or DF.empty:
-        return jsonify({
-            "total_ros": 0,
-            "total_ro_amount": 0.0,
-            "total_parts_amount": 0.0,
-            "total_labor_amount": 0.0,
-        })
+        return jsonify({"total_ros": 0, "total_ro_amount": 0.0,
+                        "total_parts_amount": 0.0, "total_labor_amount": 0.0})
 
     filtered = apply_filters(DF, request.args)
     return jsonify({
-        "total_ros": int(len(filtered)),
+        "total_ros":          int(len(filtered)),
         "total_ro_amount":    float(filtered["RO_AMOUNT_NUM"].sum())    if "RO_AMOUNT_NUM"    in filtered.columns else 0.0,
         "total_parts_amount": float(filtered["PARTS_AMOUNT_NUM"].sum()) if "PARTS_AMOUNT_NUM" in filtered.columns else 0.0,
         "total_labor_amount": float(filtered["LABOR_AMOUNT_NUM"].sum()) if "LABOR_AMOUNT_NUM" in filtered.columns else 0.0,
     })
+
 
 @app.route("/api/rows")
 def rows():
@@ -543,18 +521,15 @@ def rows():
     limit = int(request.args.get("limit", "50"))
     skip  = int(request.args.get("skip",  "0"))
 
-    filtered      = apply_filters(DF, request.args)
-    total_count   = int(len(DF))
-    filtered_count= int(len(filtered))
+    filtered       = apply_filters(DF, request.args)
+    total_count    = int(len(DF))
+    filtered_count = int(len(filtered))
 
     page = filtered.iloc[skip: skip + limit] if limit > 0 else filtered
     out  = [json_row(r) for _, r in page.iterrows()]
 
-    return jsonify({
-        "total_count": total_count,
-        "filtered_count": filtered_count,
-        "rows": out,
-    })
+    return jsonify({"total_count": total_count, "filtered_count": filtered_count, "rows": out})
+
 
 @app.route("/api/export")
 def export_excel():
@@ -569,7 +544,9 @@ def export_excel():
     export_df = pd.DataFrame([json_row(r) for _, r in filtered.iterrows()])
     export_df = export_df.rename(columns={
         "ro_id": "RO ID", "ro_date": "RO Date", "branch": "Branch",
-        "status": "Status", "sr_type": "SR Type", "hold_reason": "Hold Reason",
+        "status": "Status", "sr_type": "SR Type",
+        "ro_type": "RO Type",                        # ── NEW ──
+        "hold_reason": "Hold Reason",
         "model_name": "Model Name", "customer_name": "Customer Name",
         "sa_name": "SA Name", "reg_number": "Reg Number", "km": "KM",
         "age_bucket": "Age Bucket", "days": "Days",
@@ -579,7 +556,7 @@ def export_excel():
     })
 
     desired_order = [
-        "RO ID","RO Date","Branch","Status","SR Type","Hold Reason",
+        "RO ID","RO Date","Branch","Status","RO Type","SR Type","Hold Reason",
         "SA Name","Reg Number","Customer Name","Model Name","KM",
         "Age Bucket","Days","Total RO Amount","Total Parts Amount","Total Labor Amount"
     ]
@@ -593,12 +570,9 @@ def export_excel():
     bio.seek(0)
 
     filename = f"Open_RO_Export_{date.today().isoformat()}.xlsx"
-    return send_file(
-        bio,
-        as_attachment=True,
-        download_name=filename,
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    return send_file(bio, as_attachment=True, download_name=filename,
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 # =========================================================
 # FRONTEND (embedded HTML)
@@ -636,7 +610,6 @@ h1{font-size:26px;color:#111;}
 .flabel{display:block;font-size:12px;font-weight:800;color:#111;margin-bottom:6px;}
 input[type=date],input[type=text],select{width:100%;padding:10px;border-radius:10px;border:1px solid #ddd;font-size:13px;outline:none;background:#fff;color:#111;}
 
-/* ── Multi-Select Dropdown ── */
 .ms-wrap{position:relative;}
 .ms-trigger{width:100%;padding:10px 34px 10px 10px;border-radius:10px;border:1px solid #ddd;background:#fff;font-size:13px;font-weight:600;cursor:pointer;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#111;position:relative;}
 .ms-trigger::after{content:"▾";position:absolute;right:10px;top:50%;transform:translateY(-50%);font-size:11px;color:#888;pointer-events:none;}
@@ -661,7 +634,7 @@ input[type=date],input[type=text],select{width:100%;padding:10px;border-radius:1
 .btn-export{background:#27ae60;color:#fff;}
 .btn-export:hover{background:#229954;}
 .scroll{overflow:auto;max-height:560px;}
-table{width:100%;border-collapse:collapse;min-width:1500px;}
+table{width:100%;border-collapse:collapse;min-width:1600px;}
 thead th{position:sticky;top:0;background:#fff;z-index:10;border-bottom:2px solid #eee;padding:12px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;text-align:left;}
 tbody td{border-bottom:1px solid #f0f0f0;padding:12px 10px;font-size:12px;vertical-align:top;}
 tbody tr:hover{background:#fafafa;}
@@ -671,7 +644,6 @@ tbody tr:hover{background:#fafafa;}
 .ro-id,.reg,.money{font-weight:900;}
 .muted{color:#666;}
 
-/* Dark theme */
 body.dark{background:linear-gradient(135deg,#1a1a2e,#16213e);color:#e0e0e0;}
 body.dark header,body.dark .card,body.dark .filters,body.dark .table-wrap{background:#2d3561;color:#e0e0e0;box-shadow:0 5px 15px rgba(0,0,0,.3);}
 body.dark h1{color:#e0e0e0;}
@@ -714,6 +686,7 @@ body.dark .flabel{color:#ccc;}
       <div><span class="flabel">Branch</span>         <div class="ms-wrap" id="ms_branch"></div></div>
       <div><span class="flabel">SA Name</span>        <div class="ms-wrap" id="ms_sa_name"></div></div>
       <div><span class="flabel">RO Status</span>      <div class="ms-wrap" id="ms_status"></div></div>
+      <div><span class="flabel">RO Type</span>        <div class="ms-wrap" id="ms_ro_type"></div></div>
       <div><span class="flabel">Age Bucket</span>     <div class="ms-wrap" id="ms_age_bucket"></div></div>
       <div><span class="flabel">Hold Reason</span>    <div class="ms-wrap" id="ms_hold_reason"></div></div>
       <div><span class="flabel">Model Name</span>     <div class="ms-wrap" id="ms_model_name"></div></div>
@@ -741,12 +714,12 @@ body.dark .flabel{color:#ccc;}
       <table>
         <thead><tr>
           <th>RO ID</th><th>RO Date</th><th>Branch</th><th>Status</th>
-          <th>SR Type</th><th>Hold Reason</th><th>SA Name</th><th>Reg Number</th>
+          <th>RO Type</th><th>SR Type</th><th>Hold Reason</th><th>SA Name</th><th>Reg Number</th>
           <th>Customer Name</th><th>Model Name</th><th>KM</th>
           <th>Age Bucket</th><th>Days</th>
           <th>Total RO Amount</th><th>Total Parts Amount</th><th>Total Labor Amount</th>
         </tr></thead>
-        <tbody id="tbody"><tr><td colspan="16" class="muted">Loading...</td></tr></tbody>
+        <tbody id="tbody"><tr><td colspan="17" class="muted">Loading...</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -754,13 +727,6 @@ body.dark .flabel{color:#ccc;}
 
 <script>
 const API = window.location.origin;
-
-/* ──────────────────────────────────────────────
-   MULTI-SELECT WIDGET
-   Panel uses position:fixed so it can never be
-   clipped by overflow:hidden parents.
-   Only one panel open at a time via closeAll().
-   ────────────────────────────────────────────── */
 const _allWidgets = [];
 
 function MultiSelect(wrapperId, placeholder) {
@@ -783,17 +749,16 @@ function MultiSelect(wrapperId, placeholder) {
   document.body.appendChild(panel);
   wrap.appendChild(trigger);
 
-  const search  = panel.querySelector(".ms-search");
-  const list    = panel.querySelector(".ms-list");
-  let options   = [];
-  let selected  = new Set();
-  let onChange  = null;
+  const search = panel.querySelector(".ms-search");
+  const list   = panel.querySelector(".ms-list");
+  let options  = [];
+  let selected = new Set();
+  let onChange = null;
 
   function reposition() {
-    const r  = trigger.getBoundingClientRect();
+    const r = trigger.getBoundingClientRect();
     const vh = window.innerHeight;
-    const panelH = 280;
-    if (vh - r.bottom >= panelH || vh - r.bottom >= 120) {
+    if (vh - r.bottom >= 280 || vh - r.bottom >= 120) {
       panel.style.top    = (r.bottom + 4) + "px";
       panel.style.bottom = "auto";
     } else {
@@ -805,36 +770,26 @@ function MultiSelect(wrapperId, placeholder) {
   }
 
   function updateTrigger() {
-    if (selected.size === 0) {
-      trigger.textContent = placeholder;
-    } else if (selected.size === 1) {
-      trigger.textContent = [...selected][0];
-    } else {
-      trigger.textContent = selected.size + " selected";
-    }
+    if (selected.size === 0)       trigger.textContent = placeholder;
+    else if (selected.size === 1)  trigger.textContent = [...selected][0];
+    else                           trigger.textContent = selected.size + " selected";
     trigger.classList.toggle("active", selected.size > 0);
   }
 
   function render() {
     const q = search.value.trim().toLowerCase();
     list.innerHTML = "";
-
     const allRow = document.createElement("div");
     allRow.className = "ms-item all-row";
     allRow.innerHTML = `<input type="checkbox" ${selected.size===0?"checked":""}/><span class="ms-txt">${placeholder}</span>`;
     allRow.addEventListener("mousedown", e => { e.preventDefault(); selected.clear(); render(); fire(); });
     list.appendChild(allRow);
-
     options.filter(o => o !== "All").forEach(opt => {
       if (q && !opt.toLowerCase().includes(q)) return;
       const row = document.createElement("div");
       row.className = "ms-item";
-      const chk = document.createElement("input");
-      chk.type = "checkbox";
-      chk.checked = selected.has(opt);
-      const lbl = document.createElement("span");
-      lbl.className = "ms-txt";
-      lbl.textContent = opt;
+      const chk = document.createElement("input"); chk.type = "checkbox"; chk.checked = selected.has(opt);
+      const lbl = document.createElement("span"); lbl.className = "ms-txt"; lbl.textContent = opt;
       row.appendChild(chk); row.appendChild(lbl);
       row.addEventListener("mousedown", e => {
         e.preventDefault();
@@ -847,12 +802,9 @@ function MultiSelect(wrapperId, placeholder) {
   }
 
   function fire() { if (onChange) onChange([...selected]); }
-
   function open() {
-    closeAll();
-    reposition();
-    panel.classList.add("open");
-    trigger.classList.add("active");
+    closeAll(); reposition();
+    panel.classList.add("open"); trigger.classList.add("active");
     search.value = ""; render(); search.focus();
   }
   function close() {
@@ -861,48 +813,34 @@ function MultiSelect(wrapperId, placeholder) {
   }
 
   _allWidgets.push({ close });
-
-  trigger.addEventListener("click", e => {
-    e.stopPropagation();
-    panel.classList.contains("open") ? close() : open();
-  });
-
+  trigger.addEventListener("click", e => { e.stopPropagation(); panel.classList.contains("open") ? close() : open(); });
   search.addEventListener("input", render);
   search.addEventListener("click", e => e.stopPropagation());
-  panel.addEventListener("click", e => e.stopPropagation());
-
+  panel.addEventListener("click",  e => e.stopPropagation());
   panel.querySelectorAll(".ms-actions button").forEach(btn => {
     btn.addEventListener("mousedown", e => {
       e.preventDefault();
-      if (btn.dataset.a === "all") {
-        selected = new Set(options.filter(o => o !== "All"));
-      } else {
-        selected.clear();
-      }
+      if (btn.dataset.a === "all") selected = new Set(options.filter(o => o !== "All"));
+      else selected.clear();
       render(); fire();
     });
   });
-
   window.addEventListener("scroll", () => { if (panel.classList.contains("open")) reposition(); }, true);
   window.addEventListener("resize", () => { if (panel.classList.contains("open")) reposition(); });
 
   this.setOptions = arr => {
-    options = arr || [];
-    /* keep only selections that still exist in the new option set */
+    options  = arr || [];
     selected = new Set([...selected].filter(v => options.includes(v)));
     render();
   };
-  this.getValues  = () => [...selected];
-  this.clear      = () => { selected.clear(); render(); };
-  this.onChange   = fn => { onChange = fn; };
+  this.getValues = () => [...selected];
+  this.clear     = () => { selected.clear(); render(); };
+  this.onChange  = fn => { onChange = fn; };
 }
 
-function closeAll() {
-  _allWidgets.forEach(w => w.close());
-}
+function closeAll() { _allWidgets.forEach(w => w.close()); }
 document.addEventListener("click", closeAll);
 
-/* ── Helpers ── */
 function inr(x) {
   const n = Number(x||0);
   if (isNaN(n)) return "₹0.00";
@@ -915,23 +853,24 @@ function badgeClass(s) {
   return "badge badge-green";
 }
 
-/* ── Widgets — SR Type filter dropdown removed ── */
+/* ── Widgets ── */
 const MS = {
   branch:      new MultiSelect("ms_branch",      "All Branches"),
   sa_name:     new MultiSelect("ms_sa_name",     "All SA Names"),
   status:      new MultiSelect("ms_status",      "All Statuses"),
+  ro_type:     new MultiSelect("ms_ro_type",     "All RO Types"),   // ── NEW ──
   age_bucket:  new MultiSelect("ms_age_bucket",  "All Age Buckets"),
   hold_reason: new MultiSelect("ms_hold_reason", "All Hold Reasons"),
   model_name:  new MultiSelect("ms_model_name",  "All Models"),
 };
 
-/* ── Params — sr_type excluded from query params ── */
 function getParams() {
   const p = new URLSearchParams();
   const add = (key, w) => { const v = w.getValues(); if (v.length) p.append(key, v.join(",")); };
   add("branch",      MS.branch);
   add("sa_name",     MS.sa_name);
   add("status",      MS.status);
+  add("ro_type",     MS.ro_type);     // ── NEW ──
   add("age_bucket",  MS.age_bucket);
   add("hold_reason", MS.hold_reason);
   add("model_name",  MS.model_name);
@@ -939,41 +878,38 @@ function getParams() {
   const td = document.getElementById("to_date").value;
   const rs = document.getElementById("reg_search").value.trim();
   if (fd) p.append("from_date", fd);
-  if (td) p.append("to_date", td);
+  if (td) p.append("to_date",   td);
   if (rs) p.append("reg_search", rs);
   return p;
 }
 
-/* ── Reload SA names whenever branch selection changes ── */
 async function reloadSaNames() {
   const branchVals = MS.branch.getValues();
   const p = new URLSearchParams();
   if (branchVals.length) p.append("branch", branchVals.join(","));
   const res  = await fetch(`${API}/api/sa-names-by-branch?${p}`);
   const data = await res.json();
-  /* setOptions preserves any selections that are still valid */
   MS.sa_name.setOptions(data.sa_names || ["All"]);
 }
 
-/* ── Load filter options — sr_types not populated ── */
 async function loadFilterOptions() {
   const res  = await fetch(`${API}/api/filter-options`);
   const data = await res.json();
   MS.branch.setOptions(data.branches      || ["All"]);
   MS.sa_name.setOptions(data.sa_names     || ["All"]);
   MS.status.setOptions(data.statuses      || ["All"]);
+  MS.ro_type.setOptions(data.ro_types     || ["All"]);   // ── NEW ──
   MS.age_bucket.setOptions(data.age_buckets  || ["All"]);
   MS.hold_reason.setOptions(data.hold_reasons || ["All"]);
   MS.model_name.setOptions(data.model_names  || ["All"]);
 }
 
-/* ── Stats + Rows ── */
 async function loadStats() {
   const res = await fetch(`${API}/api/stats?${getParams()}`);
   const s   = await res.json();
   document.getElementById("kpi_total_ros").textContent = s.total_ros || 0;
-  document.getElementById("kpi_ro_amt").textContent    = inr(s.total_ro_amount   || 0);
-  document.getElementById("kpi_parts_amt").textContent = inr(s.total_parts_amount|| 0);
+  document.getElementById("kpi_ro_amt").textContent    = inr(s.total_ro_amount    || 0);
+  document.getElementById("kpi_parts_amt").textContent = inr(s.total_parts_amount || 0);
   document.getElementById("kpi_labor_amt").textContent = inr(s.total_labor_amount || 0);
 }
 
@@ -988,13 +924,14 @@ async function loadRows() {
     `Showing ${rows.length} of ${data.filtered_count} vehicles (Total: ${data.total_count})`;
   const tb = document.getElementById("tbody");
   tb.innerHTML = "";
-  if (!rows.length) { tb.innerHTML=`<tr><td colspan="16" class="muted">No data found</td></tr>`; return; }
+  if (!rows.length) { tb.innerHTML=`<tr><td colspan="17" class="muted">No data found</td></tr>`; return; }
   rows.forEach(r => {
     tb.innerHTML += `<tr>
       <td class="ro-id">${r.ro_id||"-"}</td>
       <td>${r.ro_date||"-"}</td>
       <td>${r.branch||"-"}</td>
       <td><span class="${badgeClass(r.status)}">${r.status||"-"}</span></td>
+      <td>${r.ro_type||"-"}</td>
       <td>${r.sr_type||"-"}</td>
       <td>${r.hold_reason||"-"}</td>
       <td>${r.sa_name||"-"}</td>
@@ -1019,7 +956,6 @@ function clearAll() {
   document.getElementById("to_date").value    = "";
   document.getElementById("reg_search").value = "";
   document.getElementById("limit").value      = "50";
-  /* restore full SA name list when branch filter is cleared */
   reloadSaNames().then(refreshAll);
 }
 
@@ -1040,15 +976,10 @@ function initTheme() {
   initTheme();
   await loadFilterOptions();
 
-  /* Branch change: reload SA names first, then refresh data */
-  MS.branch.onChange(async () => {
-    await reloadSaNames();
-    await refreshAll();
-  });
-
-  /* All other filters just refresh data */
+  MS.branch.onChange(async () => { await reloadSaNames(); await refreshAll(); });
   MS.sa_name.onChange(refreshAll);
   MS.status.onChange(refreshAll);
+  MS.ro_type.onChange(refreshAll);      // ── NEW ──
   MS.age_bucket.onChange(refreshAll);
   MS.hold_reason.onChange(refreshAll);
   MS.model_name.onChange(refreshAll);
@@ -1073,9 +1004,11 @@ function initTheme() {
 
 @app.route("/")
 def home():
-    return Response(HTML.replace("<h1>Unnati Vehicles Open RO Dashboard</h1>", f"<h1>{APP_TITLE}</h1>")
-                    .replace("<title>Unnati Vehicles Open RO Dashboard</title>", f"<title>{APP_TITLE}</title>"),
-                    mimetype="text/html")
+    return Response(
+        HTML.replace("<h1>Unnati Vehicles Open RO Dashboard</h1>", f"<h1>{APP_TITLE}</h1>")
+            .replace("<title>Unnati Vehicles Open RO Dashboard</title>", f"<title>{APP_TITLE}</title>"),
+        mimetype="text/html"
+    )
 
 # =========================================================
 # MAIN
