@@ -195,7 +195,8 @@ REQUIRED_COLS = [
     "Dealer Code", "Repair Order #", "RO Open Date",
     "Vehicle Registration No", "VIN #", "Odometer Reading",
     "Assigned To Full Name", "Status", "SR Type",
-    "RO Type",          # ── NEW ──
+    "RO Type",
+    "Visit Type",       # ── NEW ──
     "Hold Reason", "Total RO Amount", "Total Parts Amount",
     "Total Labor Amount", "Owner Contact First Name", "Owner Contact Last Name",
 ]
@@ -294,10 +295,14 @@ def load_data(force: bool = False):
     df["ODOMETER_NUM"] = df["Odometer Reading"].apply(clean_odometer_to_int)
     print(f"[ODO] sample cleaned values: {df['ODOMETER_NUM'].head(5).tolist()}")
 
-    # ── NEW: clean RO Type ──────────────────────────────────────────────────
     df["RO_TYPE_CLEAN"] = df["RO Type"].apply(lambda x: safe_str(x, "")).astype(str).str.strip()
     df.loc[df["RO_TYPE_CLEAN"] == "", "RO_TYPE_CLEAN"] = "Unknown"
     print(f"[RO_TYPE] unique values: {sorted(df['RO_TYPE_CLEAN'].unique().tolist())}")
+
+    # ── NEW: clean Visit Type ───────────────────────────────────────────────
+    df["VISIT_TYPE_CLEAN"] = df["Visit Type"].apply(lambda x: safe_str(x, "")).astype(str).str.strip()
+    df.loc[df["VISIT_TYPE_CLEAN"] == "", "VISIT_TYPE_CLEAN"] = "Unknown"
+    print(f"[VISIT_TYPE] unique values: {sorted(df['VISIT_TYPE_CLEAN'].unique().tolist())}")
     # ────────────────────────────────────────────────────────────────────────
 
     df = df.sort_values("RO_DATE_DT", ascending=False, na_position="last").reset_index(drop=True)
@@ -324,8 +329,9 @@ def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
     branches     = _multi(args, "branch")
     statuses     = _multi(args, "status")
     age_buckets  = _multi(args, "age_bucket")
-    sr_types     = _multi(args, "sr_type")     # kept for API compatibility
-    ro_types     = _multi(args, "ro_type")     # ── NEW ──
+    sr_types     = _multi(args, "sr_type")      # kept for API compatibility
+    ro_types     = _multi(args, "ro_type")
+    visit_types  = _multi(args, "visit_type")   # ── NEW ──
     hold_reasons = _multi(args, "hold_reason")
     model_names  = _multi(args, "model_name")
     sa_names     = _multi(args, "sa_name")
@@ -341,8 +347,10 @@ def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
         out = out[out["AGE_BUCKET"].astype(str).isin(age_buckets)]
     if sr_types:
         out = out[out["SR Type"].astype(str).isin(sr_types)]
-    if ro_types:                                                      # ── NEW ──
-        out = out[out["RO_TYPE_CLEAN"].astype(str).isin(ro_types)]   # ── NEW ──
+    if ro_types:
+        out = out[out["RO_TYPE_CLEAN"].astype(str).isin(ro_types)]
+    if visit_types:                                                           # ── NEW ──
+        out = out[out["VISIT_TYPE_CLEAN"].astype(str).isin(visit_types)]     # ── NEW ──
     if hold_reasons:
         out = out[out["HOLD_REASON_CLEAN"].astype(str).isin(hold_reasons)]
     if model_names:
@@ -375,7 +383,8 @@ def json_row(r) -> dict:
         "branch":             safe_str(r.get("Dealer Code")),
         "status":             safe_str(r.get("Status")),
         "sr_type":            safe_str(r.get("SR Type")),
-        "ro_type":            safe_str(r.get("RO_TYPE_CLEAN")),   # ── NEW ──
+        "ro_type":            safe_str(r.get("RO_TYPE_CLEAN")),
+        "visit_type":         safe_str(r.get("VISIT_TYPE_CLEAN")),   # ── NEW ──
         "hold_reason":        safe_str(r.get("HOLD_REASON_CLEAN")),
         "model_name":         safe_str(r.get("MODEL_NAME_CLEAN")),
         "customer_name":      safe_str(r.get("CUSTOMER_NAME")),
@@ -426,6 +435,7 @@ def api_debug():
             "raw_odometer":      str(r.get("Odometer Reading", "")),
             "parsed_odometer":   int(r.get("ODOMETER_NUM", 0)),
             "ro_type":           str(r.get("RO_TYPE_CLEAN", "")),
+            "visit_type":        str(r.get("VISIT_TYPE_CLEAN", "")),
         })
     return jsonify({
         "total_rows":             len(DF),
@@ -434,7 +444,8 @@ def api_debug():
         "age_buckets_present":    sorted(DF["AGE_BUCKET"].unique().tolist()) if "AGE_BUCKET" in DF.columns else [],
         "sample_odometer_raw":    DF["Odometer Reading"].dropna().head(5).tolist(),
         "sample_odometer_parsed": DF["ODOMETER_NUM"].head(5).tolist() if "ODOMETER_NUM" in DF.columns else [],
-        "ro_types_present":       sorted(DF["RO_TYPE_CLEAN"].unique().tolist()) if "RO_TYPE_CLEAN" in DF.columns else [],
+        "ro_types_present":       sorted(DF["RO_TYPE_CLEAN"].unique().tolist())    if "RO_TYPE_CLEAN"    in DF.columns else [],
+        "visit_types_present":    sorted(DF["VISIT_TYPE_CLEAN"].unique().tolist()) if "VISIT_TYPE_CLEAN" in DF.columns else [],
         "rows":                   rows,
     })
 
@@ -451,7 +462,7 @@ def filter_options():
     if DF is None or DF.empty:
         return jsonify({
             "branches": ["All"], "statuses": ["All"], "age_buckets": ["All"],
-            "ro_types": ["All"],                           # ── NEW ──
+            "ro_types": ["All"], "visit_types": ["All"],     # visit_types ── NEW ──
             "hold_reasons": ["All"], "model_names": ["All"], "sa_names": ["All"],
         })
 
@@ -460,12 +471,13 @@ def filter_options():
     hold_reasons = ["All"] + sorted([safe_str(x) for x in DF["HOLD_REASON_CLEAN"].dropna().unique()])
     model_names  = ["All"] + sorted([safe_str(x) for x in DF["MODEL_NAME_CLEAN"].dropna().unique()])
     sa_names     = ["All"] + sorted([safe_str(x) for x in DF["Assigned To Full Name"].dropna().unique()])
-
-    # ── NEW: RO Type options ─────────────────────────────────────────────────
     ro_types     = ["All"] + sorted([safe_str(x) for x in DF["RO_TYPE_CLEAN"].dropna().unique()])
+
+    # ── NEW: Visit Type options ──────────────────────────────────────────────
+    visit_types  = ["All"] + sorted([safe_str(x) for x in DF["VISIT_TYPE_CLEAN"].dropna().unique()])
     # ────────────────────────────────────────────────────────────────────────
 
-    age_order   = ["0-3 days","4-10 days","11-15 days","16-30 days","31-60 days","Above 60"]
+    age_order   = ["0-3 days", "4-10 days", "11-15 days", "16-30 days", "31-60 days", "Above 60"]
     present     = [x for x in age_order if x in set(DF["AGE_BUCKET"].astype(str).unique())]
     age_buckets = ["All"] + present
 
@@ -473,7 +485,8 @@ def filter_options():
         "branches":    branches,
         "statuses":    statuses,
         "age_buckets": age_buckets,
-        "ro_types":    ro_types,       # ── NEW ──
+        "ro_types":    ro_types,
+        "visit_types": visit_types,    # ── NEW ──
         "hold_reasons": hold_reasons,
         "model_names": model_names,
         "sa_names":    sa_names,
@@ -543,22 +556,30 @@ def export_excel():
 
     export_df = pd.DataFrame([json_row(r) for _, r in filtered.iterrows()])
     export_df = export_df.rename(columns={
-        "ro_id": "RO ID", "ro_date": "RO Date", "branch": "Branch",
-        "status": "Status", "sr_type": "SR Type",
-        "ro_type": "RO Type",                        # ── NEW ──
-        "hold_reason": "Hold Reason",
-        "model_name": "Model Name", "customer_name": "Customer Name",
-        "sa_name": "SA Name", "reg_number": "Reg Number", "km": "KM",
-        "age_bucket": "Age Bucket", "days": "Days",
-        "total_ro_amount": "Total RO Amount",
+        "ro_id":            "RO ID",
+        "ro_date":          "RO Date",
+        "branch":           "Branch",
+        "status":           "Status",
+        "sr_type":          "SR Type",
+        "ro_type":          "RO Type",
+        "visit_type":       "Visit Type",      # ── NEW ──
+        "hold_reason":      "Hold Reason",
+        "model_name":       "Model Name",
+        "customer_name":    "Customer Name",
+        "sa_name":          "SA Name",
+        "reg_number":       "Reg Number",
+        "km":               "KM",
+        "age_bucket":       "Age Bucket",
+        "days":             "Days",
+        "total_ro_amount":    "Total RO Amount",
         "total_parts_amount": "Total Parts Amount",
         "total_labor_amount": "Total Labor Amount",
     })
 
     desired_order = [
-        "RO ID","RO Date","Branch","Status","RO Type","SR Type","Hold Reason",
-        "SA Name","Reg Number","Customer Name","Model Name","KM",
-        "Age Bucket","Days","Total RO Amount","Total Parts Amount","Total Labor Amount"
+        "RO ID", "RO Date", "Branch", "Status", "RO Type", "Visit Type", "SR Type", "Hold Reason",
+        "SA Name", "Reg Number", "Customer Name", "Model Name", "KM",
+        "Age Bucket", "Days", "Total RO Amount", "Total Parts Amount", "Total Labor Amount"
     ]
     existing  = [c for c in desired_order if c in export_df.columns]
     remaining = [c for c in export_df.columns if c not in existing]
@@ -634,7 +655,7 @@ input[type=date],input[type=text],select{width:100%;padding:10px;border-radius:1
 .btn-export{background:#27ae60;color:#fff;}
 .btn-export:hover{background:#229954;}
 .scroll{overflow:auto;max-height:560px;}
-table{width:100%;border-collapse:collapse;min-width:1600px;}
+table{width:100%;border-collapse:collapse;min-width:1700px;}
 thead th{position:sticky;top:0;background:#fff;z-index:10;border-bottom:2px solid #eee;padding:12px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;text-align:left;}
 tbody td{border-bottom:1px solid #f0f0f0;padding:12px 10px;font-size:12px;vertical-align:top;}
 tbody tr:hover{background:#fafafa;}
@@ -687,6 +708,7 @@ body.dark .flabel{color:#ccc;}
       <div><span class="flabel">SA Name</span>        <div class="ms-wrap" id="ms_sa_name"></div></div>
       <div><span class="flabel">RO Status</span>      <div class="ms-wrap" id="ms_status"></div></div>
       <div><span class="flabel">RO Type</span>        <div class="ms-wrap" id="ms_ro_type"></div></div>
+      <div><span class="flabel">Visit Type</span>     <div class="ms-wrap" id="ms_visit_type"></div></div>
       <div><span class="flabel">Age Bucket</span>     <div class="ms-wrap" id="ms_age_bucket"></div></div>
       <div><span class="flabel">Hold Reason</span>    <div class="ms-wrap" id="ms_hold_reason"></div></div>
       <div><span class="flabel">Model Name</span>     <div class="ms-wrap" id="ms_model_name"></div></div>
@@ -714,12 +736,13 @@ body.dark .flabel{color:#ccc;}
       <table>
         <thead><tr>
           <th>RO ID</th><th>RO Date</th><th>Branch</th><th>Status</th>
-          <th>RO Type</th><th>SR Type</th><th>Hold Reason</th><th>SA Name</th><th>Reg Number</th>
+          <th>RO Type</th><th>Visit Type</th><th>SR Type</th><th>Hold Reason</th>
+          <th>SA Name</th><th>Reg Number</th>
           <th>Customer Name</th><th>Model Name</th><th>KM</th>
           <th>Age Bucket</th><th>Days</th>
           <th>Total RO Amount</th><th>Total Parts Amount</th><th>Total Labor Amount</th>
         </tr></thead>
-        <tbody id="tbody"><tr><td colspan="17" class="muted">Loading...</td></tr></tbody>
+        <tbody id="tbody"><tr><td colspan="18" class="muted">Loading...</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -858,7 +881,8 @@ const MS = {
   branch:      new MultiSelect("ms_branch",      "All Branches"),
   sa_name:     new MultiSelect("ms_sa_name",     "All SA Names"),
   status:      new MultiSelect("ms_status",      "All Statuses"),
-  ro_type:     new MultiSelect("ms_ro_type",     "All RO Types"),   // ── NEW ──
+  ro_type:     new MultiSelect("ms_ro_type",     "All RO Types"),
+  visit_type:  new MultiSelect("ms_visit_type",  "All Visit Types"),   // ── NEW ──
   age_bucket:  new MultiSelect("ms_age_bucket",  "All Age Buckets"),
   hold_reason: new MultiSelect("ms_hold_reason", "All Hold Reasons"),
   model_name:  new MultiSelect("ms_model_name",  "All Models"),
@@ -870,7 +894,8 @@ function getParams() {
   add("branch",      MS.branch);
   add("sa_name",     MS.sa_name);
   add("status",      MS.status);
-  add("ro_type",     MS.ro_type);     // ── NEW ──
+  add("ro_type",     MS.ro_type);
+  add("visit_type",  MS.visit_type);    // ── NEW ──
   add("age_bucket",  MS.age_bucket);
   add("hold_reason", MS.hold_reason);
   add("model_name",  MS.model_name);
@@ -898,7 +923,8 @@ async function loadFilterOptions() {
   MS.branch.setOptions(data.branches      || ["All"]);
   MS.sa_name.setOptions(data.sa_names     || ["All"]);
   MS.status.setOptions(data.statuses      || ["All"]);
-  MS.ro_type.setOptions(data.ro_types     || ["All"]);   // ── NEW ──
+  MS.ro_type.setOptions(data.ro_types     || ["All"]);
+  MS.visit_type.setOptions(data.visit_types || ["All"]);   // ── NEW ──
   MS.age_bucket.setOptions(data.age_buckets  || ["All"]);
   MS.hold_reason.setOptions(data.hold_reasons || ["All"]);
   MS.model_name.setOptions(data.model_names  || ["All"]);
@@ -924,7 +950,7 @@ async function loadRows() {
     `Showing ${rows.length} of ${data.filtered_count} vehicles (Total: ${data.total_count})`;
   const tb = document.getElementById("tbody");
   tb.innerHTML = "";
-  if (!rows.length) { tb.innerHTML=`<tr><td colspan="17" class="muted">No data found</td></tr>`; return; }
+  if (!rows.length) { tb.innerHTML=`<tr><td colspan="18" class="muted">No data found</td></tr>`; return; }
   rows.forEach(r => {
     tb.innerHTML += `<tr>
       <td class="ro-id">${r.ro_id||"-"}</td>
@@ -932,6 +958,7 @@ async function loadRows() {
       <td>${r.branch||"-"}</td>
       <td><span class="${badgeClass(r.status)}">${r.status||"-"}</span></td>
       <td>${r.ro_type||"-"}</td>
+      <td>${r.visit_type||"-"}</td>
       <td>${r.sr_type||"-"}</td>
       <td>${r.hold_reason||"-"}</td>
       <td>${r.sa_name||"-"}</td>
@@ -979,7 +1006,8 @@ function initTheme() {
   MS.branch.onChange(async () => { await reloadSaNames(); await refreshAll(); });
   MS.sa_name.onChange(refreshAll);
   MS.status.onChange(refreshAll);
-  MS.ro_type.onChange(refreshAll);      // ── NEW ──
+  MS.ro_type.onChange(refreshAll);
+  MS.visit_type.onChange(refreshAll);    // ── NEW ──
   MS.age_bucket.onChange(refreshAll);
   MS.hold_reason.onChange(refreshAll);
   MS.model_name.onChange(refreshAll);
