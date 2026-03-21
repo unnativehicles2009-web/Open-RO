@@ -34,7 +34,7 @@ BRANCH_CODE_TO_NAME = {
     "AUJB": "AURANGABAD BP",
     "AVJA": "AMRAVATI",
     "BAKA": "BARAMATI",
-    "CNLA": "CHANDRAPUR",
+    "CNJA": "CHANDRAPUR",
     "NAJB": "WADI",
     "NAJE": "KALAMNA",
     "NSKB": "NASHIK SATPUR",
