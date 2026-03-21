@@ -26,6 +26,36 @@ SHEET_NAME = os.environ.get("OPEN_RO_SHEET", "Details")
 CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "120"))
 
 # =========================================================
+# BRANCH CODE → NAME MAPPING
+# =========================================================
+BRANCH_CODE_TO_NAME = {
+    "AKJA": "AKOLA",
+    "AUJA": "AURANGABAD",
+    "AUJB": "AURANGABAD BP",
+    "AVJA": "AMRAVATI",
+    "BAKA": "BARAMATI",
+    "CNLA": "CHANDRAPUR",
+    "NAJB": "WADI",
+    "NAJE": "KALAMNA",
+    "NSKB": "NASHIK SATPUR",
+    "PUMB": "CHINCHWAD PUNE",
+    "PUME": "HADAPSAR",
+}
+
+def branch_display(code: str) -> str:
+    """Return human-readable branch name for a dealer code, or the code itself if unknown."""
+    c = (code or "").strip()
+    return BRANCH_CODE_TO_NAME.get(c, c)
+
+def branch_display_with_code(code: str) -> str:
+    """Return 'NAME (CODE)' for display, or just code if unknown."""
+    c = (code or "").strip()
+    name = BRANCH_CODE_TO_NAME.get(c)
+    if name:
+        return f"{name} ({c})"
+    return c
+
+# =========================================================
 # HELPERS
 # =========================================================
 def parse_date_any(v):
@@ -303,6 +333,9 @@ def load_data(force: bool = False):
     df.loc[df["VISIT_TYPE_CLEAN"] == "", "VISIT_TYPE_CLEAN"] = "Unknown"
     print(f"[VISIT_TYPE] unique values: {sorted(df['VISIT_TYPE_CLEAN'].unique().tolist())}")
 
+    # Branch display name (code → city name, with code for filter matching)
+    df["BRANCH_DISPLAY"] = df["Dealer Code"].apply(lambda x: branch_display(safe_str(x, "")))
+
     df = df.sort_values("RO_DATE_DT", ascending=False, na_position="last").reset_index(drop=True)
 
     DF = df
@@ -324,6 +357,7 @@ def _multi(args, key):
 def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
     out = df.copy()
 
+    # Branch filter: frontend sends dealer codes (e.g. "AKJA"), filter on raw Dealer Code column
     branches     = _multi(args, "branch")
     statuses     = _multi(args, "status")
     age_buckets  = _multi(args, "age_bucket")
@@ -375,10 +409,12 @@ def apply_filters(df: pd.DataFrame, args: dict) -> pd.DataFrame:
 
 
 def json_row(r) -> dict:
+    dealer_code = safe_str(r.get("Dealer Code"))
     return {
         "ro_id":              safe_str(r.get("Repair Order #")),
         "ro_date":            fmt_ddmmyyyy(r.get("RO_DATE_DT")),
-        "branch":             safe_str(r.get("Dealer Code")),
+        "branch":             dealer_code,                         # raw code for filter compat
+        "branch_name":        branch_display(dealer_code),         # human-readable city name
         "status":             safe_str(r.get("Status")),
         "sr_type":            safe_str(r.get("SR Type")),
         "ro_type":            safe_str(r.get("RO_TYPE_CLEAN")),
@@ -459,12 +495,19 @@ def filter_options():
     load_data(force=False)
     if DF is None or DF.empty:
         return jsonify({
-            "branches": ["All"], "statuses": ["All"], "age_buckets": ["All"],
+            "branches": [{"code": "All", "name": "All"}],
+            "statuses": ["All"], "age_buckets": ["All"],
             "ro_types": ["All"], "visit_types": ["All"],
             "hold_reasons": ["All"], "model_names": ["All"], "sa_names": ["All"],
         })
 
-    branches     = ["All"] + sorted([safe_str(x) for x in DF["Dealer Code"].dropna().unique()])
+    # Return branch objects with code + display name, sorted by display name
+    raw_codes = [safe_str(x) for x in DF["Dealer Code"].dropna().unique()]
+    branch_objects = sorted(
+        [{"code": c, "name": branch_display(c)} for c in raw_codes if c not in ("-", "")],
+        key=lambda b: b["name"]
+    )
+
     statuses     = ["All"] + sorted([safe_str(x) for x in DF["Status"].dropna().unique()])
     hold_reasons = ["All"] + sorted([safe_str(x) for x in DF["HOLD_REASON_CLEAN"].dropna().unique()])
     model_names  = ["All"] + sorted([safe_str(x) for x in DF["MODEL_NAME_CLEAN"].dropna().unique()])
@@ -477,7 +520,7 @@ def filter_options():
     age_buckets = ["All"] + present
 
     return jsonify({
-        "branches":    branches,
+        "branches":    branch_objects,   # [{code, name}, ...]
         "statuses":    statuses,
         "age_buckets": age_buckets,
         "ro_types":    ro_types,
@@ -550,6 +593,11 @@ def export_excel():
         return jsonify({"error": "No data for filters"})
 
     export_df = pd.DataFrame([json_row(r) for _, r in filtered.iterrows()])
+
+    # Use branch_name (city name) for the exported Branch column
+    export_df["branch"] = export_df["branch_name"]
+    export_df = export_df.drop(columns=["branch_name"], errors="ignore")
+
     export_df = export_df.rename(columns={
         "ro_id":            "RO ID",
         "ro_date":          "RO Date",
@@ -729,7 +777,6 @@ body.dark .flabel{color:#ccc;}
     </div>
     <div class="scroll">
       <table>
-        <!-- SR Type and Hold Reason columns removed from display only -->
         <thead><tr>
           <th>RO ID</th><th>RO Date</th><th>Branch</th><th>Status</th>
           <th>RO Type</th><th>Visit Type</th>
@@ -748,6 +795,122 @@ body.dark .flabel{color:#ccc;}
 const API = window.location.origin;
 const _allWidgets = [];
 
+/* ── Branch MultiSelect: stores codes internally, displays names ── */
+function BranchMultiSelect(wrapperId, placeholder) {
+  const wrap    = document.getElementById(wrapperId);
+  const trigger = document.createElement("button");
+  trigger.type  = "button";
+  trigger.className = "ms-trigger";
+  trigger.textContent = placeholder;
+
+  const panel   = document.createElement("div");
+  panel.className = "ms-panel";
+  panel.innerHTML = `
+    <input class="ms-search" type="text" placeholder="Search…"/>
+    <div class="ms-actions">
+      <button type="button" data-a="all">Select All</button>
+      <button type="button" data-a="none">Clear</button>
+    </div>
+    <div class="ms-list"></div>`;
+
+  document.body.appendChild(panel);
+  wrap.appendChild(trigger);
+
+  const search = panel.querySelector(".ms-search");
+  const list   = panel.querySelector(".ms-list");
+  let options  = [];   // [{code, name}]
+  let selected = new Set();  // stores codes
+  let onChange = null;
+
+  function reposition() {
+    const r = trigger.getBoundingClientRect();
+    const vh = window.innerHeight;
+    if (vh - r.bottom >= 280 || vh - r.bottom >= 120) {
+      panel.style.top    = (r.bottom + 4) + "px";
+      panel.style.bottom = "auto";
+    } else {
+      panel.style.bottom = (vh - r.top + 4) + "px";
+      panel.style.top    = "auto";
+    }
+    panel.style.left  = r.left + "px";
+    panel.style.width = Math.max(r.width, 220) + "px";
+  }
+
+  function updateTrigger() {
+    if (selected.size === 0)      trigger.textContent = placeholder;
+    else if (selected.size === 1) {
+      const code = [...selected][0];
+      const opt  = options.find(o => o.code === code);
+      trigger.textContent = opt ? opt.name : code;
+    }
+    else trigger.textContent = selected.size + " selected";
+    trigger.classList.toggle("active", selected.size > 0);
+  }
+
+  function render() {
+    const q = search.value.trim().toLowerCase();
+    list.innerHTML = "";
+    const allRow = document.createElement("div");
+    allRow.className = "ms-item all-row";
+    allRow.innerHTML = `<input type="checkbox" ${selected.size===0?"checked":""}/><span class="ms-txt">${placeholder}</span>`;
+    allRow.addEventListener("mousedown", e => { e.preventDefault(); selected.clear(); render(); fire(); });
+    list.appendChild(allRow);
+    options.forEach(opt => {
+      if (q && !opt.name.toLowerCase().includes(q) && !opt.code.toLowerCase().includes(q)) return;
+      const row = document.createElement("div");
+      row.className = "ms-item";
+      const chk = document.createElement("input"); chk.type = "checkbox"; chk.checked = selected.has(opt.code);
+      const lbl = document.createElement("span"); lbl.className = "ms-txt"; lbl.textContent = opt.name;
+      row.appendChild(chk); row.appendChild(lbl);
+      row.addEventListener("mousedown", e => {
+        e.preventDefault();
+        selected.has(opt.code) ? selected.delete(opt.code) : selected.add(opt.code);
+        render(); fire();
+      });
+      list.appendChild(row);
+    });
+    updateTrigger();
+  }
+
+  function fire() { if (onChange) onChange([...selected]); }
+  function open() {
+    closeAll(); reposition();
+    panel.classList.add("open"); trigger.classList.add("active");
+    search.value = ""; render(); search.focus();
+  }
+  function close() {
+    panel.classList.remove("open");
+    if (selected.size === 0) trigger.classList.remove("active");
+  }
+
+  _allWidgets.push({ close });
+  trigger.addEventListener("click", e => { e.stopPropagation(); panel.classList.contains("open") ? close() : open(); });
+  search.addEventListener("input", render);
+  search.addEventListener("click", e => e.stopPropagation());
+  panel.addEventListener("click",  e => e.stopPropagation());
+  panel.querySelectorAll(".ms-actions button").forEach(btn => {
+    btn.addEventListener("mousedown", e => {
+      e.preventDefault();
+      if (btn.dataset.a === "all") selected = new Set(options.map(o => o.code));
+      else selected.clear();
+      render(); fire();
+    });
+  });
+  window.addEventListener("scroll", () => { if (panel.classList.contains("open")) reposition(); }, true);
+  window.addEventListener("resize", () => { if (panel.classList.contains("open")) reposition(); });
+
+  this.setOptions = arr => {
+    // arr: [{code, name}, ...] — skip the {code:"All"} sentinel
+    options  = (arr || []).filter(o => o.code !== "All");
+    selected = new Set([...selected].filter(c => options.some(o => o.code === c)));
+    render();
+  };
+  this.getValues = () => [...selected];   // returns codes
+  this.clear     = () => { selected.clear(); render(); };
+  this.onChange  = fn => { onChange = fn; };
+}
+
+/* ── Standard string MultiSelect ── */
 function MultiSelect(wrapperId, placeholder) {
   const wrap    = document.getElementById(wrapperId);
   const trigger = document.createElement("button");
@@ -872,9 +1035,9 @@ function badgeClass(s) {
   return "badge badge-green";
 }
 
-/* ── Widgets — all filters intact ── */
+/* ── Widgets ── */
 const MS = {
-  branch:      new MultiSelect("ms_branch",      "All Branches"),
+  branch:      new BranchMultiSelect("ms_branch",      "All Branches"),
   sa_name:     new MultiSelect("ms_sa_name",     "All SA Names"),
   status:      new MultiSelect("ms_status",      "All Statuses"),
   ro_type:     new MultiSelect("ms_ro_type",     "All RO Types"),
@@ -886,8 +1049,11 @@ const MS = {
 
 function getParams() {
   const p = new URLSearchParams();
+  // Branch: getValues() returns dealer codes — send as-is so backend filter works correctly
+  const branchCodes = MS.branch.getValues();
+  if (branchCodes.length) p.append("branch", branchCodes.join(","));
+
   const add = (key, w) => { const v = w.getValues(); if (v.length) p.append(key, v.join(",")); };
-  add("branch",      MS.branch);
   add("sa_name",     MS.sa_name);
   add("status",      MS.status);
   add("ro_type",     MS.ro_type);
@@ -905,9 +1071,9 @@ function getParams() {
 }
 
 async function reloadSaNames() {
-  const branchVals = MS.branch.getValues();
+  const branchCodes = MS.branch.getValues();
   const p = new URLSearchParams();
-  if (branchVals.length) p.append("branch", branchVals.join(","));
+  if (branchCodes.length) p.append("branch", branchCodes.join(","));
   const res  = await fetch(`${API}/api/sa-names-by-branch?${p}`);
   const data = await res.json();
   MS.sa_name.setOptions(data.sa_names || ["All"]);
@@ -916,7 +1082,10 @@ async function reloadSaNames() {
 async function loadFilterOptions() {
   const res  = await fetch(`${API}/api/filter-options`);
   const data = await res.json();
-  MS.branch.setOptions(data.branches       || ["All"]);
+
+  // Branches come as [{code, name}, ...] objects
+  MS.branch.setOptions(data.branches || []);
+
   MS.sa_name.setOptions(data.sa_names      || ["All"]);
   MS.status.setOptions(data.statuses       || ["All"]);
   MS.ro_type.setOptions(data.ro_types      || ["All"]);
@@ -948,11 +1117,11 @@ async function loadRows() {
   tb.innerHTML = "";
   if (!rows.length) { tb.innerHTML=`<tr><td colspan="16" class="muted">No data found</td></tr>`; return; }
   rows.forEach(r => {
-    /* SR Type and Hold Reason omitted from row render only — data still in API response */
+    // Display branch_name (city name) in the table; branch (code) used only for filtering
     tb.innerHTML += `<tr>
       <td class="ro-id">${r.ro_id||"-"}</td>
       <td>${r.ro_date||"-"}</td>
-      <td>${r.branch||"-"}</td>
+      <td>${r.branch_name||r.branch||"-"}</td>
       <td><span class="${badgeClass(r.status)}">${r.status||"-"}</span></td>
       <td>${r.ro_type||"-"}</td>
       <td>${r.visit_type||"-"}</td>
